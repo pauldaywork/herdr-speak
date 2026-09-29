@@ -20,6 +20,30 @@ The plugin rewrites the answer for listening with `claude -p` on Haiku, using th
 - A Kokoro-FastAPI server, by default at `http://127.0.0.1:8880/v1`.
 - `python3`, `ffplay` from FFmpeg, and the `claude` CLI signed in.
 
+## Start Kokoro on an NVIDIA GPU
+
+Kokoro runs in Docker. The host needs an NVIDIA driver, Docker Engine, and the NVIDIA Container Toolkit. Follow the official [Docker installation guide](https://docs.docker.com/engine/install/ubuntu/) and [NVIDIA Container Toolkit guide](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html). Confirm the host driver works with `nvidia-smi` and that Docker accepts `--gpus all`. You do not need a host CUDA Toolkit or Python for Kokoro: the GPU image contains its runtime and dependencies.
+
+The plugin starts Kokoro for you. When the server at a local `baseUrl` doesn't answer `/health`, it runs `docker start kokoro-tts`. If that container doesn't exist yet, it runs the `docker run` command below, choosing the image for your GPU with `nvidia-smi`. Then it waits up to two minutes for Kokoro to report healthy. A notification tells you it is starting. The first `docker run` also downloads the image, which takes longer. You can still start Kokoro yourself with the command below.
+
+For an RTX 50-series or other Blackwell GPU, use Kokoro's CUDA 12.8 image:
+
+```bash
+docker run -d --name kokoro-tts --restart unless-stopped \
+  --gpus all -p 127.0.0.1:8880:8880 \
+  ghcr.io/remsky/kokoro-fastapi-gpu:latest-cu128
+```
+
+For an RTX 30 or 40 series GPU, use `ghcr.io/remsky/kokoro-fastapi-gpu:latest` instead. Check the [Kokoro image instructions](https://github.com/remsky/Kokoro-FastAPI) for your GPU. The `127.0.0.1` port binding makes the speech API available only on this computer.
+
+Confirm Kokoro is ready:
+
+```bash
+curl --fail --silent --show-error http://127.0.0.1:8880/health
+```
+
+The expected response includes `"status":"healthy"`.
+
 ## Install
 
 ```bash
@@ -57,9 +81,14 @@ The voice, speed, and server come from `~/.pi/speak.json` when it exists, so Pi'
   "speed": 1.0,
   "rewrite": true,
   "rewriteModel": "haiku",
-  "rewriteTimeout": 60
+  "rewriteTimeout": 60,
+  "autoStart": true,
+  "container": "kokoro-tts",
+  "startTimeout": 120
 }
 ```
+
+Set `autoStart` to `false` to stop the plugin from starting Docker. When the plugin creates the container, it picks the image from the GPU's compute capability. It uses `ghcr.io/remsky/kokoro-fastapi-gpu:latest-cu128` for an RTX 50-series or other Blackwell GPU and `ghcr.io/remsky/kokoro-fastapi-gpu:latest` for an RTX 30 or 40 series. To override the choice, set `"image"` in `config.json`.
 
 `player` can also be set to another command that plays raw 24 kHz mono 16-bit PCM from standard input, such as `["pw-play", "--rate", "24000", "--channels", "1", "--format", "s16", "-"]`.
 

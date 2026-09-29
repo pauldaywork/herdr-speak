@@ -15,7 +15,9 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -33,6 +35,10 @@ DEFAULTS = {
     "rewrite": True,
     "rewriteModel": "haiku",
     "rewriteTimeout": 60,
+    "autoStart": True,
+    "container": "kokoro-tts",
+    "image": None,  # None picks the GPU image to match the NVIDIA GPU
+    "startTimeout": 120,
     "player": [
         "ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet",
         "-f", "s16le", "-ar", "24000", "-ch_layout", "mono", "-i", "-",
@@ -181,6 +187,72 @@ def last_answer():
     return text
 
 
+# --- Starting Kokoro --------------------------------------------------------
+
+
+def kokoro_healthy(base_url):
+    parts = urllib.parse.urlsplit(base_url)
+    try:
+        with urllib.request.urlopen(f"{parts.scheme}://{parts.netloc}/health", timeout=3) as response:
+            return json.load(response).get("status") == "healthy"
+    except (OSError, ValueError):
+        return False
+
+
+def gpu_image():
+    """Kokoro's GPU image for this machine's NVIDIA GPU.
+
+    Blackwell GPUs (RTX 50 series and data-center B-series) have compute
+    capability 10 or higher and need the CUDA 12.8 build; RTX 30 and 40 series
+    use the default build.
+    """
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        capability = max(float(line) for line in out.split())
+    except (OSError, ValueError, subprocess.CalledProcessError) as error:
+        raise RuntimeError(f"No NVIDIA GPU found to pick a Kokoro image ({error}).") from error
+    tag = "latest-cu128" if capability >= 10 else "latest"
+    return f"ghcr.io/remsky/kokoro-fastapi-gpu:{tag}"
+
+
+def ensure_kokoro(config):
+    """Start the local Kokoro container when the server isn't answering.
+
+    Starts the existing container if there is one, otherwise runs a new one
+    the way the README does, then waits for it to report healthy.
+    """
+    if kokoro_healthy(config["baseUrl"]):
+        return
+    parts = urllib.parse.urlsplit(config["baseUrl"])
+    if not config["autoStart"] or parts.hostname not in ("127.0.0.1", "localhost"):
+        return
+    name = config["container"]
+    exists = subprocess.run(
+        ["docker", "container", "inspect", name], capture_output=True, check=False,
+    ).returncode == 0
+    if exists:
+        command = ["docker", "start", name]
+    else:
+        port = parts.port or 8880
+        command = [
+            "docker", "run", "-d", "--name", name, "--restart", "unless-stopped",
+            "--gpus", "all", "-p", f"127.0.0.1:{port}:8880", config["image"] or gpu_image(),
+        ]
+    notify("Speak: starting Kokoro", f"{name} isn't running; this can take a minute.")
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        raise RuntimeError(f"{' '.join(command[:2])} failed: {result.stderr.strip()[-300:]}")
+    deadline = time.monotonic() + config["startTimeout"]
+    while time.monotonic() < deadline:
+        if kokoro_healthy(config["baseUrl"]):
+            return
+        time.sleep(1)
+    raise RuntimeError(f"Kokoro didn't become healthy within {config['startTimeout']} seconds.")
+
+
 # --- Turning it into speech --------------------------------------------------
 
 
@@ -324,6 +396,11 @@ def worker(verbatim):
         text = last_answer()
     except Exception as error:  # noqa: BLE001 - every failure becomes a notification
         notify("Speak: nothing to read", str(error))
+        return
+    try:
+        ensure_kokoro(config)
+    except (OSError, RuntimeError) as error:
+        notify("Speak: couldn't start Kokoro", str(error))
         return
     try:
         if config["rewrite"] and not verbatim:
