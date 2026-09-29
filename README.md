@@ -1,6 +1,6 @@
 # herdr-speak
 
-A [herdr](https://herdr.dev/) plugin that reads the focused pane's last Claude Code or Pi answer aloud through a local [Kokoro-FastAPI](https://github.com/remsky/Kokoro-FastAPI) text-to-speech server. Press `prefix+shift+s` to start it, and press it again to stop.
+A [herdr](https://herdr.dev/) plugin that reads the focused pane's last Claude Code or Pi answer aloud through a local [Kokoro-FastAPI](https://github.com/remsky/Kokoro-FastAPI) text-to-speech server. Press `prefix+shift+s` to hear it rewritten for listening, or `prefix+shift+v` to hear it as written. Press either key again to stop.
 
 It finds the answer from the session herdr records for the pane. While the agent is still working, it reads the last finished answer instead of the one in progress.
 
@@ -34,7 +34,15 @@ key = "prefix+shift+s"
 type = "plugin_action"
 command = "speak.last"
 description = "speak: read the last answer aloud (again to stop)"
+
+[[keys.command]]
+key = "prefix+shift+v"
+type = "plugin_action"
+command = "speak.last-verbatim"
+description = "speak: read the last answer as written, no rewrite (again to stop)"
 ```
+
+Either key stops speech that is already playing, whichever one started it.
 
 For Pi panes, run `herdr integration install pi` so herdr records Pi's session. Without it, the plugin falls back to the newest Pi session in the pane's working directory.
 
