@@ -436,19 +436,39 @@ def spoken_dir(config):
     return STATE_DIR / "spoken"
 
 
-def project_name(source):
-    """The repository a file belongs to (the main checkout for a worktree), else its folder."""
-    result = subprocess.run(
-        ["git", "-C", str(source.parent), "rev-parse", "--path-format=absolute", "--git-common-dir"],
-        capture_output=True, text=True, check=False,
-    )
-    if result.returncode == 0:
-        return Path(result.stdout.strip()).parent.name
-    return source.parent.name
+def spoken_location(source):
+    """(project, name) that a source's saved files go under.
+
+    Inside git the project is the main repository's folder name (the same for
+    every worktree) and the name is the file's path from that worktree's top
+    level, without `.md` and with `--` between folders, so docs/README.md and
+    README.md don't collide. Outside git, or if git can't run, the project is the
+    file's folder and the name is its stem.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "git", "-C", str(source.parent), "rev-parse", "--path-format=absolute",
+                "--git-common-dir", "--show-toplevel",
+            ],
+            capture_output=True, text=True, check=False,
+        )
+    except OSError:
+        return source.parent.name, source.stem
+    lines = result.stdout.splitlines()
+    if result.returncode == 0 and len(lines) == 2:
+        try:
+            relative = source.relative_to(lines[1]).with_suffix("")
+        except ValueError:
+            return source.parent.name, source.stem
+        return Path(lines[0]).parent.name, "--".join(relative.parts)
+    return source.parent.name, source.stem
 
 
 def spoken_base(source, config):
-    return spoken_dir(config) / project_name(source) / source.stem
+    """Base path (no suffix) for source's saved text and audio."""
+    project, name = spoken_location(source)
+    return spoken_dir(config) / project / name
 
 
 def saved_audio(source, base):

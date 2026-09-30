@@ -131,23 +131,54 @@ class SpokenPathsTest(unittest.TestCase):
     def git(self, *args):
         subprocess.run(["git", *args], check=True, capture_output=True)
 
+    def commit(self, repo):
+        self.git("-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t",
+                 "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "init")
+
     def test_project_is_the_repository_name(self):
         repo = self.tmp / "myrepo"
         (repo / "docs").mkdir(parents=True)
         self.git("init", "-q", str(repo))
-        self.assertEqual(speak.project_name(repo / "docs" / "plan.md"), "myrepo")
+        self.assertEqual(speak.spoken_location(repo / "docs" / "plan.md"), ("myrepo", "docs--plan"))
 
     def test_project_of_a_worktree_is_the_main_repository(self):
         repo = self.tmp / "myrepo"
         self.git("init", "-q", str(repo))
-        self.git("-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t",
-                 "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "init")
+        self.commit(repo)
         self.git("-C", str(repo), "worktree", "add", "-q", str(self.tmp / "wt-feature"))
-        self.assertEqual(speak.project_name(self.tmp / "wt-feature" / "plan.md"), "myrepo")
+        self.assertEqual(speak.spoken_location(self.tmp / "wt-feature" / "plan.md"), ("myrepo", "plan"))
 
     def test_project_outside_git_is_the_folder_name(self):
         (self.tmp / "plans").mkdir()
-        self.assertEqual(speak.project_name(self.tmp / "plans" / "x.md"), "plans")
+        self.assertEqual(speak.spoken_location(self.tmp / "plans" / "x.md"), ("plans", "x"))
+
+    def test_folder_name_is_used_when_git_cannot_run(self):
+        (self.tmp / "plans").mkdir()
+        with mock.patch.object(speak.subprocess, "run", side_effect=FileNotFoundError("git")):
+            self.assertEqual(speak.spoken_location(self.tmp / "plans" / "x.md"), ("plans", "x"))
+
+    def test_same_file_name_in_different_folders_gets_different_bases(self):
+        repo = self.tmp / "myrepo"
+        (repo / "docs").mkdir(parents=True)
+        self.git("init", "-q", str(repo))
+        config = dict(speak.DEFAULTS, spokenDir=str(self.tmp / "spoken"))
+        top = speak.spoken_base(repo / "README.md", config)
+        nested = speak.spoken_base(repo / "docs" / "README.md", config)
+        self.assertEqual(top, self.tmp / "spoken" / "myrepo" / "README")
+        self.assertEqual(nested, self.tmp / "spoken" / "myrepo" / "docs--README")
+
+    def test_a_worktree_file_has_the_same_base_as_in_the_main_checkout(self):
+        repo = self.tmp / "myrepo"
+        (repo / "docs").mkdir(parents=True)
+        self.git("init", "-q", str(repo))
+        self.commit(repo)
+        self.git("-C", str(repo), "worktree", "add", "-q", str(self.tmp / "wt-feature"))
+        (self.tmp / "wt-feature" / "docs").mkdir(exist_ok=True)
+        config = dict(speak.DEFAULTS, spokenDir=str(self.tmp / "spoken"))
+        self.assertEqual(
+            speak.spoken_base(self.tmp / "wt-feature" / "docs" / "plan.md", config),
+            speak.spoken_base(repo / "docs" / "plan.md", config),
+        )
 
     def test_spoken_dir_defaults_to_the_state_dir_and_expands_home(self):
         self.assertEqual(speak.spoken_dir(dict(speak.DEFAULTS)), speak.STATE_DIR / "spoken")
