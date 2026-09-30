@@ -369,11 +369,11 @@ def spoken_file(base, suffix):
 
 
 class Recording:
-    """Saves what play() speaks as <base>.md and <base>.opus.
+    """Saves spoken text and its audio as <base>.md and <base>.opus.
 
-    Audio is encoded to <base>.opus.part as it plays, and both files appear
-    only when playback finishes, so a stopped run never leaves a partial file
-    that a later replay would trust.
+    Audio is encoded to <base>.opus.part as it is written, and both files
+    appear only on finish(), so a stopped run never leaves a partial file that
+    a later replay would trust.
     """
 
     def __init__(self, base):
@@ -497,12 +497,11 @@ def play_file(audio, config):
         raise RuntimeError(f"ffmpeg exited {decoder.returncode}, player exited {player.returncode}")
 
 
-def play(chunks, config, recording=None):
+def play(chunks, config):
     """Speak each text chunk in order through one player process.
 
     Chunks are pulled on a separate thread so the rewrite keeps streaming while
-    earlier sentences play. With a recording, the text and audio are saved when
-    every chunk has played.
+    earlier sentences play.
     """
     pending = queue.Queue()
 
@@ -516,34 +515,22 @@ def play(chunks, config, recording=None):
 
     threading.Thread(target=produce, daemon=True).start()
     player = subprocess.Popen(config["player"], stdin=subprocess.PIPE)
-    spoke = complete = False
+    spoke = False
     try:
-        if recording:
-            recording.start()
         while True:
             kind, item = pending.get()
             if kind == "done":
-                complete = True
                 break
             if kind == "error":
                 if not spoke:
                     raise item
                 print(f"stopped partway: {item!r}", file=sys.stderr)
                 break
-            if recording:
-                recording.add_text(item)
             for audio in synthesize(item, config):
                 player.stdin.write(audio)
-                if recording:
-                    recording.write(audio)
             spoke = True
         player.stdin.close()
         player.wait()
-        if recording and complete and spoke:
-            try:
-                recording.finish()
-            except (OSError, RuntimeError) as error:
-                print(f"failed to save recording: {error!r}", file=sys.stderr)
     except BrokenPipeError:
         pass
     finally:
@@ -552,33 +539,25 @@ def play(chunks, config, recording=None):
         if player.stdin and not player.stdin.closed:
             player.stdin.close()
         player.wait()
-        if recording and not recording.finished:
-            recording.abort()
     return spoke
 
 
-def say(text, config, verbatim=False, prompt=PROMPT, timeout=None, save_to=None):
-    """Rewrite text for listening and play it, reading the cleaned text if the rewrite fails.
-
-    With save_to, the spoken text and audio are saved beside that base path.
-    """
+def say(text, config, verbatim=False):
+    """Rewrite text for listening and play it, reading the cleaned text if the rewrite fails."""
     try:
         ensure_kokoro(config)
     except (OSError, RuntimeError) as error:
         notify("Speak: couldn't start Kokoro", str(error))
         return
     try:
-        recording = Recording(save_to) if save_to else None
         if config["rewrite"] and not verbatim:
             try:
-                stream = rewrite_stream(text, config, prompt, timeout)
-                play(sentences(stream), config, recording)
+                play(sentences(rewrite_stream(text, config)), config)
                 return
             except (OSError, RuntimeError) as error:
                 if isinstance(error, urllib.error.URLError):
                     raise
                 print(f"rewrite failed, reading cleaned text instead: {error!r}", file=sys.stderr)
-        # The cleaned text is a degraded fallback, so it is never saved for replay.
         play([strip_markdown(text)], config)
     except Exception as error:  # noqa: BLE001
         notify("Speak: TTS failed", f"{config['baseUrl']}: {error}")
@@ -594,8 +573,33 @@ def worker(verbatim):
     say(text, config, verbatim=verbatim)
 
 
+def render(text, config, base, prompt=PLAN_PROMPT, timeout=None):
+    """Rewrite text for listening and save the speech as <base>.md and <base>.opus, unplayed.
+
+    Raises when the rewrite or Kokoro fails, and then saves nothing.
+    """
+    recording = Recording(base)
+    recording.start()
+    try:
+        for sentence in sentences(rewrite_stream(text, config, prompt, timeout)):
+            recording.add_text(sentence)
+            for audio in synthesize(sentence, config):
+                recording.write(audio)
+        if not recording.parts:
+            raise RuntimeError("the rewrite was empty")
+        recording.finish()
+        if not recording.finished:
+            raise RuntimeError(f"couldn't save {recording.audio}")
+    finally:
+        if not recording.finished:
+            recording.abort()
+
+
 def worker_plan(path):
-    """Speak a plan file, replaying the saved audio when the file hasn't changed since."""
+    """Prepare a plan's audio, then show the plan with a player that plays it.
+
+    A plan whose saved audio is newer than the file is replayed as it is.
+    """
     config = load_config()
     source = Path(path).resolve()
     base = spoken_base(source, config)
@@ -605,17 +609,34 @@ def worker_plan(path):
             play_file(audio, config)
             return
         except (OSError, RuntimeError) as error:
-            # Speak it afresh below, which replaces a corrupt saved file.
+            # Prepare it afresh below, which replaces a corrupt saved file.
             notify("Speak: couldn't replay the saved audio", str(error))
     try:
         text = source.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as error:
         notify("Speak: can't read the plan", str(error))
         return
-    say(text, config, prompt=PLAN_PROMPT, timeout=config["planRewriteTimeout"], save_to=base)
+    try:
+        ensure_kokoro(config)
+    except (OSError, RuntimeError) as error:
+        notify("Speak: couldn't start Kokoro", str(error))
+        return
+    if config["rewrite"]:
+        notify("Speak: preparing the plan", "It plays once the audio is ready. Press the key again to cancel.")
+        try:
+            render(text, config, base, timeout=config["planRewriteTimeout"])
+        except (OSError, RuntimeError) as error:
+            if isinstance(error, urllib.error.URLError):
+                notify("Speak: TTS failed", f"{config['baseUrl']}: {error}")
+                return
+            print(f"rewrite failed, reading cleaned text instead: {error!r}", file=sys.stderr)
+    show_plan(str(source))
     audio = saved_audio(source, base)
     if audio:
-        open_player(str(source), audio, paused=True)
+        open_player(str(source), audio, paused=False)
+    else:
+        # The cleaned text is a degraded fallback, so it is streamed and never saved.
+        say(text, config, verbatim=True)
 
 
 # --- Picking a plan ------------------------------------------------------------
@@ -694,12 +715,13 @@ def pick():
         return
     path = choice.split("\t", 1)[0]
     stop()
-    show_plan(path)
     source = Path(path).resolve()
     audio = saved_audio(source, spoken_base(source, config))
     if audio:
+        show_plan(path)
         open_player(path, audio, paused=False)
     else:
+        # The worker shows the plan and its player once the audio is ready.
         start_worker(["--plan", path])
 
 

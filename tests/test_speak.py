@@ -66,67 +66,28 @@ def fake_synthesize(text, config):
     yield b"\0" * 4800  # 0.1 s of silence
 
 
-class RecordingTest(unittest.TestCase):
+class PlayTest(unittest.TestCase):
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp())
-        self.base = self.tmp / "proj" / "v1.2-plan"
         self.config = dict(speak.DEFAULTS, player=["sh", "-c", "cat > /dev/null"])
 
-    def play(self, chunks, recording=None):
+    def play(self, chunks):
         with mock.patch.object(speak, "synthesize", fake_synthesize):
-            return speak.play(chunks, self.config, recording)
+            return speak.play(chunks, self.config)
 
     def test_spoken_file_keeps_dots_in_the_name(self):
-        self.assertEqual(speak.spoken_file(self.base, ".opus").name, "v1.2-plan.opus")
+        self.assertEqual(speak.spoken_file(Path("proj/v1.2-plan"), ".opus").name, "v1.2-plan.opus")
 
-    def test_complete_playback_saves_text_and_audio(self):
-        self.assertTrue(self.play(["First sentence.", "Second sentence."], speak.Recording(self.base)))
-        folder = self.base.parent
-        self.assertEqual((folder / "v1.2-plan.md").read_text(), "First sentence.\n\nSecond sentence.\n")
-        self.assertGreater((folder / "v1.2-plan.opus").stat().st_size, 0)
-        self.assertFalse((folder / "v1.2-plan.opus.part").exists())
+    def test_every_chunk_is_spoken(self):
+        self.assertTrue(self.play(["First sentence.", "Second sentence."]))
 
-    def test_playback_that_stops_partway_saves_nothing(self):
+    def test_a_rewrite_that_dies_partway_keeps_what_was_spoken(self):
         def chunks():
             yield "First sentence."
             raise RuntimeError("rewrite died")
 
-        self.assertTrue(self.play(chunks(), speak.Recording(self.base)))
-        self.assertEqual(list(self.base.parent.iterdir()), [])
-
-    def test_play_without_a_recording_still_works(self):
-        self.assertTrue(self.play(["Just speak."]))
-
-    def test_encoder_failure_is_caught_and_does_not_fail_playback(self):
-        # Make ffmpeg fail by using an invalid audio format.
-        bad_format = ["-f", "nosuchformat"]
-        with mock.patch.object(speak, "AUDIO_FORMAT", bad_format):
-            # Should not raise; should return True and complete playback normally.
-            result = self.play(["Speak this."], speak.Recording(self.base))
-        self.assertTrue(result)
-        # No audio or text files should exist since encoding failed.
-        self.assertFalse((self.base.parent / "v1.2-plan.opus").exists())
-        self.assertFalse((self.base.parent / "v1.2-plan.md").exists())
-        self.assertFalse((self.base.parent / "v1.2-plan.opus.part").exists())
-
-
-    def test_encoder_that_dies_midway_does_not_stop_playback(self):
-        fake_command(self.tmp, "ffmpeg", "#!/bin/sh\nexit 1\n")
-        out = self.tmp / "played.pcm"
-        config = dict(self.config, player=["sh", "-c", f"cat > '{out}'"])
-
-        def big(text, config):
-            for _ in range(5):
-                yield b"\0" * 200_000
-
-        with mock.patch.dict(os.environ, {"PATH": f"{self.tmp}:{os.environ['PATH']}"}), \
-                mock.patch.object(speak, "synthesize", big), \
-                contextlib.redirect_stderr(io.StringIO()) as note:
-            spoke = speak.play(["Speak this."], config, speak.Recording(self.base))
-        self.assertTrue(spoke)
-        self.assertEqual(note.getvalue().count("encoder failed"), 1)
-        self.assertEqual(out.stat().st_size, 1_000_000)
-        self.assertEqual(list(self.base.parent.iterdir()), [])
+        with contextlib.redirect_stderr(io.StringIO()) as note:
+            self.assertTrue(self.play(chunks()))
+        self.assertIn("stopped partway", note.getvalue())
 
 
 class SpokenPathsTest(unittest.TestCase):
@@ -215,10 +176,11 @@ class PlayFileTest(unittest.TestCase):
     def test_saved_audio_is_decoded_into_the_player(self):
         tmp = Path(tempfile.mkdtemp())
         out = tmp / "played.pcm"
-        config = dict(speak.DEFAULTS, player=["sh", "-c", "cat > /dev/null"])
-        with mock.patch.object(speak, "synthesize", fake_synthesize):
-            speak.play(["Hello."], config, speak.Recording(tmp / "hello"))
-        speak.play_file(tmp / "hello.opus", dict(config, player=["sh", "-c", f"cat > '{out}'"]))
+        config = dict(speak.DEFAULTS, player=["sh", "-c", f"cat > '{out}'"])
+        with mock.patch.multiple(speak, synthesize=fake_synthesize,
+                                 rewrite_stream=lambda text, config, prompt, timeout: iter(["Hello."])):
+            speak.render("# Hello", config, tmp / "hello", timeout=5)
+        speak.play_file(tmp / "hello.opus", config)
         self.assertGreater(out.stat().st_size, 0)
 
 
@@ -235,56 +197,73 @@ class WorkerPlanTest(unittest.TestCase):
             spokenDir=str(self.tmp / "spoken"),
             player=["sh", "-c", "cat > /dev/null"],
         )
+        self.audio = self.tmp / "spoken" / "proj" / "plan.opus"
         self.prompts = []
 
     def fake_rewrite(self, text, config, prompt, timeout):
         self.prompts.append((prompt, timeout))
         return iter(["Spoken plan. It has one step."])
 
-    def run_worker(self):
-        with mock.patch.multiple(
-            speak,
+    def run_worker(self, **patches):
+        """Run worker_plan with fakes for Claude, Kokoro and herdr; return the mocks it used."""
+        fakes = dict(
             load_config=lambda: self.config,
             ensure_kokoro=lambda config: None,
             synthesize=fake_synthesize,
             rewrite_stream=self.fake_rewrite,
-        ), mock.patch.object(speak, "play_file") as replay, \
-                mock.patch.object(speak, "open_player") as self.player:
+        )
+        fakes.update(patches)
+        mocks = dict(play_file=mock.DEFAULT, show_plan=mock.DEFAULT, open_player=mock.DEFAULT,
+                     notify=mock.DEFAULT, play=mock.DEFAULT)
+        mocks = {name: value for name, value in mocks.items() if name not in patches}
+        with mock.patch.multiple(speak, **fakes), mock.patch.multiple(speak, **mocks) as used, \
+                contextlib.redirect_stderr(io.StringIO()):
             speak.worker_plan(str(self.source))
-        return replay
+        return used
+
+    def titles(self, notify):
+        return [call.args[0] for call in notify.call_args_list]
 
     def test_first_play_rewrites_with_the_plan_prompt_and_saves_outside_the_project(self):
-        replay = self.run_worker()
-        replay.assert_not_called()
+        self.run_worker()
         self.assertEqual(self.prompts, [(speak.PLAN_PROMPT, 300)])
         folder = self.tmp / "spoken" / "proj"
         self.assertEqual((folder / "plan.md").read_text(), "Spoken plan. It has one step.\n")
-        self.assertTrue((folder / "plan.opus").exists())
+        self.assertTrue(self.audio.exists())
         self.assertEqual(sorted(p.name for p in (self.tmp / "proj").iterdir()), ["plan.md"])
 
-    def test_first_play_opens_the_player_paused_once_the_audio_is_saved(self):
-        self.run_worker()
-        self.player.assert_called_once_with(
-            str(self.source.resolve()), self.tmp / "spoken" / "proj" / "plan.opus", paused=True,
-        )
+    def test_first_play_renders_the_audio_then_shows_the_plan_and_plays_it(self):
+        def open_player(path, audio, paused):
+            self.assertTrue(audio.exists(), "the player opened before the audio was saved")
+
+        player = mock.Mock(side_effect=open_player)
+        used = self.run_worker(open_player=player)
+        player.assert_called_once()
+        used["play"].assert_not_called()
+        used["show_plan"].assert_called_once_with(str(self.source.resolve()))
+        self.assertEqual(self.titles(used["notify"]), ["Speak: preparing the plan"])
+
+    def test_the_player_starts_playing(self):
+        player = mock.Mock()
+        self.run_worker(open_player=player)
+        player.assert_called_once_with(str(self.source.resolve()), self.audio, paused=False)
 
     def test_second_play_of_an_unchanged_file_replays_the_saved_audio(self):
         self.run_worker()
-        replay = self.run_worker()
-        replay.assert_called_once_with(self.tmp / "spoken" / "proj" / "plan.opus", self.config)
+        used = self.run_worker()
+        used["play_file"].assert_called_once_with(self.audio, self.config)
+        used["open_player"].assert_not_called()
         self.assertEqual(len(self.prompts), 1)
-        self.player.assert_not_called()
 
     def test_an_edited_file_is_rewritten_again(self):
         self.run_worker()
         future = time.time() + 60
         os.utime(self.source, (future, future))
-        replay = self.run_worker()
-        replay.assert_not_called()
+        used = self.run_worker()
+        used["play_file"].assert_not_called()
         self.assertEqual(len(self.prompts), 2)
 
-
-    def test_a_failed_rewrite_speaks_the_fallback_and_saves_nothing(self):
+    def test_a_failed_rewrite_shows_the_plan_and_speaks_the_fallback_unsaved(self):
         spoken = []
 
         def broken(text, config, prompt, timeout):
@@ -295,42 +274,84 @@ class WorkerPlanTest(unittest.TestCase):
             spoken.append(text)
             yield b"\0" * 4800
 
-        with mock.patch.multiple(
-            speak,
-            load_config=lambda: self.config,
-            ensure_kokoro=lambda config: None,
-            synthesize=record,
-            rewrite_stream=broken,
-        ), mock.patch.object(speak, "play_file"), \
-                mock.patch.object(speak, "open_player") as player, \
-                contextlib.redirect_stderr(io.StringIO()):
-            speak.worker_plan(str(self.source))
-        player.assert_not_called()
+        used = self.run_worker(rewrite_stream=broken, synthesize=record, play=speak.play)
         self.assertEqual(spoken, [speak.strip_markdown(self.source.read_text())])
         self.assertFalse((self.tmp / "spoken").exists() and any((self.tmp / "spoken").rglob("*.*")))
+        used["show_plan"].assert_called_once_with(str(self.source.resolve()))
+        used["open_player"].assert_not_called()
 
+    def test_a_kokoro_failure_is_reported_and_nothing_plays(self):
+        def down(text, config):
+            raise speak.urllib.error.URLError("connection refused")
+            yield
+
+        used = self.run_worker(synthesize=down)
+        self.assertEqual(self.titles(used["notify"])[-1], "Speak: TTS failed")
+        used["play"].assert_not_called()
+        used["open_player"].assert_not_called()
+        self.assertFalse(self.audio.exists())
 
     def test_a_corrupt_saved_audio_is_reported_and_replaced(self):
         self.run_worker()
-        saved = self.tmp / "spoken" / "proj" / "plan.opus"
-        saved.write_bytes(b"not audio")
-        with mock.patch.multiple(
-            speak,
-            load_config=lambda: self.config,
-            ensure_kokoro=lambda config: None,
-            synthesize=fake_synthesize,
-            rewrite_stream=self.fake_rewrite,
-            notify=mock.DEFAULT,
-            open_player=mock.DEFAULT,
-        ) as patched, contextlib.redirect_stderr(io.StringIO()):
-            speak.worker_plan(str(self.source))
-        patched["open_player"].assert_called_once_with(str(self.source.resolve()), saved, paused=True)
-        patched["notify"].assert_called_once()
-        self.assertEqual(patched["notify"].call_args.args[0], "Speak: couldn't replay the saved audio")
+        self.audio.write_bytes(b"not audio")
+        used = self.run_worker(play_file=speak.play_file)
+        self.assertEqual(self.titles(used["notify"])[0], "Speak: couldn't replay the saved audio")
+        used["open_player"].assert_called_once_with(str(self.source.resolve()), self.audio, paused=False)
         self.assertEqual(len(self.prompts), 2)
         replayed = self.tmp / "played.pcm"
-        speak.play_file(saved, dict(self.config, player=["sh", "-c", f"cat > '{replayed}'"]))
+        speak.play_file(self.audio, dict(self.config, player=["sh", "-c", f"cat > '{replayed}'"]))
         self.assertGreater(replayed.stat().st_size, 0)
+
+
+class RenderTest(unittest.TestCase):
+    def setUp(self):
+        self.base = Path(tempfile.mkdtemp()) / "proj" / "plan"
+        self.config = dict(speak.DEFAULTS)
+
+    def render(self, rewrite):
+        with mock.patch.multiple(speak, rewrite_stream=rewrite, synthesize=fake_synthesize):
+            speak.render("# Plan", self.config, self.base, timeout=5)
+
+    def test_saves_the_text_and_audio(self):
+        self.render(lambda text, config, prompt, timeout: iter(["First step. Second step."]))
+        self.assertEqual(speak.spoken_file(self.base, ".md").read_text(), "First step. Second step.\n")
+        self.assertGreater(speak.spoken_file(self.base, ".opus").stat().st_size, 0)
+
+    def test_a_failed_rewrite_raises_and_saves_nothing(self):
+        def broken(text, config, prompt, timeout):
+            yield "First step. "
+            raise RuntimeError("claude exited 1")
+
+        with self.assertRaises(RuntimeError):
+            self.render(broken)
+        self.assertEqual(list(self.base.parent.iterdir()), [])
+
+    def test_an_encoder_that_fails_raises_and_saves_nothing(self):
+        with mock.patch.object(speak, "AUDIO_FORMAT", ["-f", "nosuchformat"]), \
+                contextlib.redirect_stderr(io.StringIO()), self.assertRaises(RuntimeError):
+            self.render(lambda text, config, prompt, timeout: iter(["Speak this."]))
+        self.assertEqual(list(self.base.parent.iterdir()), [])
+
+    def test_an_encoder_that_dies_midway_raises_and_saves_nothing(self):
+        bin_dir = self.base.parent.parent
+        fake_command(bin_dir, "ffmpeg", "#!/bin/sh\nexit 1\n")
+
+        def big(text, config):
+            for _ in range(5):
+                yield b"\0" * 200_000
+
+        with mock.patch.dict(os.environ, {"PATH": f"{bin_dir}:{os.environ['PATH']}"}), \
+                mock.patch.multiple(speak, synthesize=big,
+                                    rewrite_stream=lambda text, config, prompt, timeout: iter(["Speak this."])), \
+                contextlib.redirect_stderr(io.StringIO()) as note, self.assertRaises(RuntimeError):
+            speak.render("# Plan", self.config, self.base, timeout=5)
+        self.assertEqual(note.getvalue().count("encoder failed"), 1)
+        self.assertEqual(list(self.base.parent.iterdir()), [])
+
+    def test_an_empty_rewrite_raises_and_saves_nothing(self):
+        with self.assertRaises(RuntimeError):
+            self.render(lambda text, config, prompt, timeout: iter([]))
+        self.assertEqual(list(self.base.parent.iterdir()), [])
 
 
 class PlanFilesTest(unittest.TestCase):
@@ -563,12 +584,12 @@ class PickTest(unittest.TestCase):
     def chosen(self):
         return subprocess.CompletedProcess([], 0, stdout=f"{self.plan}\t2026-09-30 10:00  plan.md\n")
 
-    def test_a_new_plan_is_shown_and_handed_to_a_worker(self):
+    def test_a_new_plan_is_handed_to_a_worker_to_prepare(self):
         self.pick(self.chosen())
         [(command, kwargs)] = self.fzf_calls
         self.assertIn(str(self.plan), kwargs["input"])
-        self.show.assert_called_once_with(str(self.plan))
         self.start.assert_called_once_with(["--plan", str(self.plan)])
+        self.show.assert_not_called()  # the worker shows it once the audio is ready
         self.player.assert_not_called()
 
     def test_a_plan_with_saved_audio_plays_in_the_player(self):
