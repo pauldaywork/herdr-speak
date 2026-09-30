@@ -817,6 +817,14 @@ class PanesTest(unittest.TestCase):
     def calls(self, prefix=""):
         return [line for line in self.log.read_text().splitlines() if line.startswith(prefix)]
 
+    def saved(self, name, captions=True):
+        """A saved base under the temp spoken folder, with its .lrc when captions is true."""
+        base = self.tmp / "spoken" / "proj" / name
+        base.parent.mkdir(parents=True, exist_ok=True)
+        if captions:
+            speak.spoken_file(base, ".lrc").write_text("[00:00.00]Hi.\n")
+        return base
+
     def test_a_plan_opens_read_only_beside_the_pane_the_key_was_pressed_in(self):
         speak.show_plan("/work/proj/docs/plan.md")
         self.assertEqual(self.calls("plugin"), [
@@ -862,6 +870,28 @@ class PanesTest(unittest.TestCase):
         self.assertEqual(sorted(self.calls("pane close")), ["pane close p1", "pane close p2"])
         self.assertIn("SPEAK_PLAN=/work/b.md", self.calls("plugin")[-1])
 
+    def test_a_plan_with_captions_opens_them_between_the_plan_and_the_player(self):
+        audio = speak.spoken_file(self.saved("docs--plan"), ".opus")
+        speak.show_plan("/work/docs/plan.md")
+        speak.open_player("/work/docs/plan.md", audio, paused=False)
+        self.assertEqual(self.calls("plugin")[1:], [
+            "plugin pane open --plugin speak --entrypoint captions --placement split --direction down"
+            f" --cwd /work/docs --env SPEAK_LYRICS={audio.with_suffix('.lrc')} --no-focus --target-pane p1",
+            "plugin pane open --plugin speak --entrypoint plan-player --placement split --direction down"
+            f" --cwd /work/docs --env SPEAK_AUDIO={audio} --no-focus --target-pane p2",
+        ])
+        entry = {"plan": "/work/docs/plan.md"}
+        self.assertEqual(json.loads(speak.PANES_FILE.read_text()), {
+            "plan": dict(entry, pane="p1"), "captions": dict(entry, pane="p2"), "player": dict(entry, pane="p3"),
+        })
+
+    def test_replaying_a_plan_replaces_its_captions_and_player(self):
+        audio = speak.spoken_file(self.saved("plan"), ".opus")
+        speak.show_plan("/work/plan.md")
+        speak.open_player("/work/plan.md", audio, paused=False)
+        speak.open_player("/work/plan.md", audio, paused=False)
+        self.assertEqual(sorted(self.calls("pane close")), ["pane close p2", "pane close p3"])
+
     def test_without_a_plan_pane_the_player_opens_beside_the_key_pane(self):
         speak.open_player("/work/plan.md", Path("/s/plan.opus"), paused=True)
         self.assertIn("--direction right", self.calls("plugin")[-1])
@@ -875,16 +905,18 @@ class PanesTest(unittest.TestCase):
         notify.assert_called_once_with("Speak: couldn't open a pane", "no such pane")
 
     def test_a_selection_opens_its_text_captions_and_player_in_a_column(self):
-        speak.show_selection(Path("/s/proj/selection-1"))
+        base = self.saved("selection-1")
+        speak.show_selection(base)
+        folder = base.parent
         self.assertEqual(self.calls("plugin"), [
             "plugin pane open --plugin speak --entrypoint plan-view --placement split --direction right"
-            " --cwd /s/proj --env SPEAK_PLAN=/s/proj/selection-1.txt --no-focus --target-pane w2",
+            f" --cwd {folder} --env SPEAK_PLAN={folder}/selection-1.txt --no-focus --target-pane w2",
             "plugin pane open --plugin speak --entrypoint captions --placement split --direction down"
-            " --cwd /s/proj --env SPEAK_LYRICS=/s/proj/selection-1.lrc --no-focus --target-pane p1",
+            f" --cwd {folder} --env SPEAK_LYRICS={folder}/selection-1.lrc --no-focus --target-pane p1",
             "plugin pane open --plugin speak --entrypoint plan-player --placement split --direction down"
-            " --cwd /s/proj --env SPEAK_AUDIO=/s/proj/selection-1.opus --no-focus --target-pane p2",
+            f" --cwd {folder} --env SPEAK_AUDIO={folder}/selection-1.opus --no-focus --target-pane p2",
         ])
-        entry = {"plan": "/s/proj/selection-1.txt"}
+        entry = {"plan": f"{folder}/selection-1.txt"}
         self.assertEqual(json.loads(speak.PANES_FILE.read_text()), {
             "plan": dict(entry, pane="p1"), "captions": dict(entry, pane="p2"), "player": dict(entry, pane="p3"),
         })
@@ -892,16 +924,16 @@ class PanesTest(unittest.TestCase):
     def test_a_selection_replaces_an_open_plan_and_its_player(self):
         speak.show_plan("/work/a.md")
         speak.open_player("/work/a.md", Path("/s/a.opus"), paused=False)
-        speak.show_selection(Path("/s/proj/selection-1"))
+        speak.show_selection(self.saved("selection-1"))
         self.assertEqual(sorted(self.calls("pane close")), ["pane close p1", "pane close p2"])
 
     def test_a_new_selection_replaces_the_last_one(self):
-        speak.show_selection(Path("/s/proj/selection-1"))
-        speak.show_selection(Path("/s/proj/selection-2"))
+        speak.show_selection(self.saved("selection-1"))
+        speak.show_selection(self.saved("selection-2"))
         self.assertEqual(sorted(self.calls("pane close")), ["pane close p1", "pane close p2", "pane close p3"])
 
     def test_a_plan_replaces_an_open_selection(self):
-        speak.show_selection(Path("/s/proj/selection-1"))
+        speak.show_selection(self.saved("selection-1"))
         speak.show_plan("/work/a.md")
         self.assertEqual(sorted(self.calls("pane close")), ["pane close p1", "pane close p2", "pane close p3"])
         self.assertIn("SPEAK_PLAN=/work/a.md", self.calls("plugin")[-1])
@@ -911,10 +943,10 @@ class PanesTest(unittest.TestCase):
             '"plugin pane")\n', '"plugin pane")\n        case "$*" in *"--entrypoint captions"*) echo boom >&2; exit 1 ;; esac\n')
         flaky = fake_command(self.tmp, "herdr-flaky", script)
         with mock.patch.dict(os.environ, {"HERDR_BIN_PATH": str(flaky)}), mock.patch.object(speak, "notify"):
-            speak.show_selection(Path("/s/proj/selection-1"))
+            speak.show_selection(self.saved("selection-1"))
         self.assertTrue(self.calls("plugin")[-1].endswith("--target-pane p1"))
         self.assertIn("--entrypoint plan-player", self.calls("plugin")[-1])
-        entry = {"plan": "/s/proj/selection-1.txt"}
+        entry = {"plan": str(self.tmp / "spoken" / "proj" / "selection-1.txt")}
         self.assertEqual(json.loads(speak.PANES_FILE.read_text()), {
             "plan": dict(entry, pane="p1"), "player": dict(entry, pane="p2"),
         })
@@ -923,7 +955,7 @@ class PanesTest(unittest.TestCase):
         failing = fake_command(self.tmp, "herdr-fails", "#!/bin/sh\necho 'no such pane' >&2\nexit 1\n")
         with mock.patch.dict(os.environ, {"HERDR_BIN_PATH": str(failing)}), \
                 mock.patch.object(speak, "notify") as notify:
-            speak.show_selection(Path("/s/proj/selection-1"))
+            speak.show_selection(self.saved("selection-1"))
         notify.assert_called_once_with("Speak: couldn't open a pane", "no such pane")
 
 

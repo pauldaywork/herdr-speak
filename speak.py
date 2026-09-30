@@ -942,18 +942,31 @@ def show_plan(path):
 
 
 def open_player(path, audio, paused):
-    """Open mpv on the plan's saved audio under its pane, replacing any player already open."""
+    """Open mpv on saved audio under the text pane, with live captions between them.
+
+    Captions open when the audio has its .lrc beside it (recordings made before
+    captions don't). Any captions and player already open are replaced.
+    """
     panes = load_panes()
+    close_pane(panes, "captions")
     close_pane(panes, "player")
     shown = live_pane(panes, "plan")
     if shown:
         target, direction = shown["pane"], "down"
     else:
         target, direction = os.environ.get("SPEAK_TARGET_PANE"), "right"
+    cwd = Path(path).parent
+    lyrics = Path(audio).with_suffix(".lrc")
+    if lyrics.exists():
+        captions = open_pane("captions", direction, target, cwd, {"SPEAK_LYRICS": str(lyrics)})
+        if captions:
+            panes["captions"] = {"pane": captions, "plan": path}
+            # Without captions the player goes under the text: the audio is the point.
+            target, direction = captions, "down"
     env = {"SPEAK_AUDIO": str(audio)}
     if paused:
         env["SPEAK_PAUSE"] = "1"
-    pane = open_pane("plan-player", direction, target, Path(path).parent, env)
+    pane = open_pane("plan-player", direction, target, cwd, env)
     if pane:
         panes["player"] = {"pane": pane, "plan": path}
     save_panes(panes)
@@ -994,16 +1007,9 @@ def show_selection(base):
     view = open_pane("plan-view", "right", os.environ.get("HERDR_PANE_ID"), base.parent, {"SPEAK_PLAN": text})
     if view:
         panes["plan"] = {"pane": view, "plan": text}
-        captions = open_pane("captions", "down", view, base.parent,
-                             {"SPEAK_LYRICS": str(spoken_file(base, ".lrc"))})
-        if captions:
-            panes["captions"] = {"pane": captions, "plan": text}
-        # Without captions the player goes under the text: the audio is the point.
-        player = open_pane("plan-player", "down", captions or view, base.parent,
-                           {"SPEAK_AUDIO": str(spoken_file(base, ".opus"))})
-        if player:
-            panes["player"] = {"pane": player, "plan": text}
     save_panes(panes)
+    if view:
+        open_player(text, spoken_file(base, ".opus"), paused=False)
 
 
 def sptlrx_config(folder):
