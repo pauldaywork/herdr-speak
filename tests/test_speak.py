@@ -1,6 +1,8 @@
 import os
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -98,6 +100,122 @@ class RecordingTest(unittest.TestCase):
         self.assertFalse((self.base.parent / "v1.2-plan.opus").exists())
         self.assertFalse((self.base.parent / "v1.2-plan.md").exists())
         self.assertFalse((self.base.parent / "v1.2-plan.opus.part").exists())
+
+
+class SpokenPathsTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def git(self, *args):
+        subprocess.run(["git", *args], check=True, capture_output=True)
+
+    def test_project_is_the_repository_name(self):
+        repo = self.tmp / "myrepo"
+        (repo / "docs").mkdir(parents=True)
+        self.git("init", "-q", str(repo))
+        self.assertEqual(speak.project_name(repo / "docs" / "plan.md"), "myrepo")
+
+    def test_project_of_a_worktree_is_the_main_repository(self):
+        repo = self.tmp / "myrepo"
+        self.git("init", "-q", str(repo))
+        self.git("-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t",
+                 "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "init")
+        self.git("-C", str(repo), "worktree", "add", "-q", str(self.tmp / "wt-feature"))
+        self.assertEqual(speak.project_name(self.tmp / "wt-feature" / "plan.md"), "myrepo")
+
+    def test_project_outside_git_is_the_folder_name(self):
+        (self.tmp / "plans").mkdir()
+        self.assertEqual(speak.project_name(self.tmp / "plans" / "x.md"), "plans")
+
+    def test_spoken_dir_defaults_to_the_state_dir_and_expands_home(self):
+        self.assertEqual(speak.spoken_dir(dict(speak.DEFAULTS)), speak.STATE_DIR / "spoken")
+        config = dict(speak.DEFAULTS, spokenDir="~/Audio/plans")
+        self.assertEqual(speak.spoken_dir(config), Path.home() / "Audio" / "plans")
+
+    def test_spoken_base_uses_project_and_file_stem(self):
+        (self.tmp / "plans").mkdir()
+        config = dict(speak.DEFAULTS, spokenDir=str(self.tmp / "spoken"))
+        base = speak.spoken_base(self.tmp / "plans" / "big-plan.md", config)
+        self.assertEqual(base, self.tmp / "spoken" / "plans" / "big-plan")
+
+    def test_saved_audio_only_when_newer_than_the_source(self):
+        source = self.tmp / "plan.md"
+        source.write_text("# Plan")
+        base = self.tmp / "spoken" / "plan"
+        self.assertIsNone(speak.saved_audio(source, base))
+        base.parent.mkdir()
+        audio = speak.spoken_file(base, ".opus")
+        audio.write_bytes(b"x")
+        now = time.time()
+        os.utime(source, (now - 60, now - 60))
+        self.assertEqual(speak.saved_audio(source, base), audio)
+        os.utime(source, (now + 60, now + 60))
+        self.assertIsNone(speak.saved_audio(source, base))
+
+
+class PlayFileTest(unittest.TestCase):
+    def test_saved_audio_is_decoded_into_the_player(self):
+        tmp = Path(tempfile.mkdtemp())
+        out = tmp / "played.pcm"
+        config = dict(speak.DEFAULTS, player=["sh", "-c", "cat > /dev/null"])
+        with mock.patch.object(speak, "synthesize", fake_synthesize):
+            speak.play(["Hello."], config, speak.Recording(tmp / "hello"))
+        speak.play_file(tmp / "hello.opus", dict(config, player=["sh", "-c", f"cat > '{out}'"]))
+        self.assertGreater(out.stat().st_size, 0)
+
+
+class WorkerPlanTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        (self.tmp / "proj").mkdir()
+        self.source = self.tmp / "proj" / "plan.md"
+        self.source.write_text("# Plan\n\n- [ ] Step one\n")
+        past = time.time() - 60
+        os.utime(self.source, (past, past))
+        self.config = dict(
+            speak.DEFAULTS,
+            spokenDir=str(self.tmp / "spoken"),
+            player=["sh", "-c", "cat > /dev/null"],
+        )
+        self.prompts = []
+
+    def fake_rewrite(self, text, config, prompt, timeout):
+        self.prompts.append((prompt, timeout))
+        return iter(["Spoken plan. It has one step."])
+
+    def run_worker(self):
+        with mock.patch.multiple(
+            speak,
+            load_config=lambda: self.config,
+            ensure_kokoro=lambda config: None,
+            synthesize=fake_synthesize,
+            rewrite_stream=self.fake_rewrite,
+        ), mock.patch.object(speak, "play_file") as replay:
+            speak.worker_plan(str(self.source))
+        return replay
+
+    def test_first_play_rewrites_with_the_plan_prompt_and_saves_outside_the_project(self):
+        replay = self.run_worker()
+        replay.assert_not_called()
+        self.assertEqual(self.prompts, [(speak.PLAN_PROMPT, 300)])
+        folder = self.tmp / "spoken" / "proj"
+        self.assertEqual((folder / "plan.md").read_text(), "Spoken plan. It has one step.\n")
+        self.assertTrue((folder / "plan.opus").exists())
+        self.assertEqual(sorted(p.name for p in (self.tmp / "proj").iterdir()), ["plan.md"])
+
+    def test_second_play_of_an_unchanged_file_replays_the_saved_audio(self):
+        self.run_worker()
+        replay = self.run_worker()
+        replay.assert_called_once_with(self.tmp / "spoken" / "proj" / "plan.opus", self.config)
+        self.assertEqual(len(self.prompts), 1)
+
+    def test_an_edited_file_is_rewritten_again(self):
+        self.run_worker()
+        future = time.time() + 60
+        os.utime(self.source, (future, future))
+        replay = self.run_worker()
+        replay.assert_not_called()
+        self.assertEqual(len(self.prompts), 2)
 
 
 if __name__ == "__main__":

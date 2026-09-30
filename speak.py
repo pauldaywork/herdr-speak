@@ -38,6 +38,7 @@ DEFAULTS = {
     "rewriteModel": "haiku",
     "rewriteTimeout": 60,
     "planRewriteTimeout": 300,  # plans are long, and the rewrite keeps every step
+    "spokenDir": None,  # None saves spoken plans under the plugin state dir
     "autoStart": True,
     "container": "kokoro-tts",
     "image": None,  # None picks the GPU image to match the NVIDIA GPU
@@ -417,6 +418,51 @@ class Recording:
         self.partial.unlink(missing_ok=True)
 
 
+def spoken_dir(config):
+    """Where spoken plans are saved: outside every project, so agents don't read them as plans."""
+    if config.get("spokenDir"):
+        return Path(config["spokenDir"]).expanduser()
+    return STATE_DIR / "spoken"
+
+
+def project_name(source):
+    """The repository a file belongs to (the main checkout for a worktree), else its folder."""
+    result = subprocess.run(
+        ["git", "-C", str(source.parent), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+        capture_output=True, text=True, check=False,
+    )
+    if result.returncode == 0:
+        return Path(result.stdout.strip()).parent.name
+    return source.parent.name
+
+
+def spoken_base(source, config):
+    return spoken_dir(config) / project_name(source) / source.stem
+
+
+def saved_audio(source, base):
+    """The saved audio for source, when it is newer than the file."""
+    audio = spoken_file(base, ".opus")
+    try:
+        if audio.stat().st_mtime > source.stat().st_mtime:
+            return audio
+    except OSError:
+        pass
+    return None
+
+
+def play_file(audio, config):
+    """Replay saved audio through the configured PCM player."""
+    decoder = subprocess.Popen(
+        ["ffmpeg", "-loglevel", "error", "-i", str(audio), *AUDIO_FORMAT, "-"],
+        stdout=subprocess.PIPE,
+    )
+    player = subprocess.Popen(config["player"], stdin=decoder.stdout)
+    decoder.stdout.close()
+    player.wait()
+    decoder.wait()
+
+
 def play(chunks, config, recording=None):
     """Speak each text chunk in order through one player process.
 
@@ -474,13 +520,11 @@ def play(chunks, config, recording=None):
     return spoke
 
 
-def worker(verbatim):
-    config = load_config()
-    try:
-        text = last_answer()
-    except Exception as error:  # noqa: BLE001 - every failure becomes a notification
-        notify("Speak: nothing to read", str(error))
-        return
+def say(text, config, verbatim=False, prompt=PROMPT, timeout=None, save_to=None):
+    """Rewrite text for listening and play it, reading the cleaned text if the rewrite fails.
+
+    With save_to, the spoken text and audio are saved beside that base path.
+    """
     try:
         ensure_kokoro(config)
     except (OSError, RuntimeError) as error:
@@ -489,15 +533,43 @@ def worker(verbatim):
     try:
         if config["rewrite"] and not verbatim:
             try:
-                play(sentences(rewrite_stream(text, config)), config)
+                stream = rewrite_stream(text, config, prompt, timeout)
+                play(sentences(stream), config, Recording(save_to) if save_to else None)
                 return
             except (OSError, RuntimeError) as error:
                 if isinstance(error, urllib.error.URLError):
                     raise
                 print(f"rewrite failed, reading cleaned text instead: {error!r}", file=sys.stderr)
-        play([strip_markdown(text)], config)
+        play([strip_markdown(text)], config, Recording(save_to) if save_to else None)
     except Exception as error:  # noqa: BLE001
         notify("Speak: TTS failed", f"{config['baseUrl']}: {error}")
+
+
+def worker(verbatim):
+    config = load_config()
+    try:
+        text = last_answer()
+    except Exception as error:  # noqa: BLE001 - every failure becomes a notification
+        notify("Speak: nothing to read", str(error))
+        return
+    say(text, config, verbatim=verbatim)
+
+
+def worker_plan(path):
+    """Speak a plan file, replaying the saved audio when the file hasn't changed since."""
+    config = load_config()
+    source = Path(path).resolve()
+    base = spoken_base(source, config)
+    audio = saved_audio(source, base)
+    if audio:
+        play_file(audio, config)
+        return
+    try:
+        text = source.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as error:
+        notify("Speak: can't read the plan", str(error))
+        return
+    say(text, config, prompt=PLAN_PROMPT, timeout=config["planRewriteTimeout"], save_to=base)
 
 
 # --- Process control -----------------------------------------------------------
@@ -524,6 +596,16 @@ def stop():
     return True
 
 
+def start_worker(args):
+    """Run `speak.py worker *args` detached, so the caller returns at once."""
+    with open(LOG_FILE, "a") as log:
+        process = subprocess.Popen(
+            [sys.executable, str(Path(__file__).resolve()), "worker", *args],
+            stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True,
+        )
+    PID_FILE.write_text(str(process.pid))
+
+
 def main(argv):
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     command = argv[1] if len(argv) > 1 else "toggle"
@@ -534,15 +616,13 @@ def main(argv):
     elif command == "toggle":
         if stop():
             return
-        with open(LOG_FILE, "a") as log:
-            args = [sys.executable, str(Path(__file__).resolve()), "worker"] + (["--verbatim"] if verbatim else [])
-            process = subprocess.Popen(
-                args, stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True,
-            )
-        PID_FILE.write_text(str(process.pid))
+        start_worker(["--verbatim"] if verbatim else [])
     elif command == "worker":
         try:
-            worker(verbatim)
+            if "--plan" in argv:
+                worker_plan(argv[argv.index("--plan") + 1])
+            else:
+                worker(verbatim)
         finally:
             if running_worker() == os.getpid():
                 PID_FILE.unlink(missing_ok=True)
