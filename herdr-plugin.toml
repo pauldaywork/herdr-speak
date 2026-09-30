@@ -55,3 +55,19 @@ id = "plan-player"
 title = "Speak: player · space pause · ←/→ 5s · ↑/↓ 1m · q close"
 placement = "split"
 command = ["sh", "-c", "exec python3 \"$HERDR_PLUGIN_ROOT/speak.py\" player"]
+
+# Opened by speak.selection to the right of the pane the key was pressed in:
+# glow renders the selection's spoken rewrite, scrollable. q closes it.
+[[panes]]
+id = "text-view"
+title = "Speak: rewrite · j/k scroll · q close"
+placement = "split"
+command = ["sh", "-c", "exec glow -t \"$SPEAK_TEXT\""]
+
+# Opened by speak.selection under the rewrite's pane: sptlrx shows the rewrite as
+# captions in step with the mpv player under it, the spoken sentence in bold. q closes it.
+[[panes]]
+id = "captions"
+title = "Speak: captions · q close"
+placement = "split"
+command = ["sh", "-c", "exec python3 \"$HERDR_PLUGIN_ROOT/speak.py\" captions"]

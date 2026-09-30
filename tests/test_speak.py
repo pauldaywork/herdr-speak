@@ -614,6 +614,7 @@ class PanesTest(unittest.TestCase):
             "FAKE_LIVE": str(self.live),
             "HERDR_PLUGIN_ID": "speak",
             "SPEAK_TARGET_PANE": "w1",
+            "HERDR_PANE_ID": "w2",
         }
         patches = [
             mock.patch.dict(os.environ, self.env),
@@ -683,6 +684,45 @@ class PanesTest(unittest.TestCase):
             speak.show_plan("/work/plan.md")
         notify.assert_called_once_with("Speak: couldn't open a pane", "no such pane")
 
+    def test_a_selection_opens_its_text_captions_and_player_in_a_column(self):
+        speak.show_selection(Path("/s/proj/selection-1"))
+        self.assertEqual(self.calls("plugin"), [
+            "plugin pane open --plugin speak --entrypoint text-view --placement split --direction right"
+            " --cwd /s/proj --env SPEAK_TEXT=/s/proj/selection-1.md --no-focus --target-pane w2",
+            "plugin pane open --plugin speak --entrypoint captions --placement split --direction down"
+            " --cwd /s/proj --env SPEAK_LYRICS=/s/proj/selection-1.lrc --no-focus --target-pane p1",
+            "plugin pane open --plugin speak --entrypoint plan-player --placement split --direction down"
+            " --cwd /s/proj --env SPEAK_AUDIO=/s/proj/selection-1.opus --no-focus --target-pane p2",
+        ])
+        entry = {"plan": "/s/proj/selection-1.md"}
+        self.assertEqual(json.loads(speak.PANES_FILE.read_text()), {
+            "plan": dict(entry, pane="p1"), "captions": dict(entry, pane="p2"), "player": dict(entry, pane="p3"),
+        })
+
+    def test_a_selection_replaces_an_open_plan_and_its_player(self):
+        speak.show_plan("/work/a.md")
+        speak.open_player("/work/a.md", Path("/s/a.opus"), paused=False)
+        speak.show_selection(Path("/s/proj/selection-1"))
+        self.assertEqual(sorted(self.calls("pane close")), ["pane close p1", "pane close p2"])
+
+    def test_a_new_selection_replaces_the_last_one(self):
+        speak.show_selection(Path("/s/proj/selection-1"))
+        speak.show_selection(Path("/s/proj/selection-2"))
+        self.assertEqual(sorted(self.calls("pane close")), ["pane close p1", "pane close p2", "pane close p3"])
+
+    def test_a_plan_replaces_an_open_selection(self):
+        speak.show_selection(Path("/s/proj/selection-1"))
+        speak.show_plan("/work/a.md")
+        self.assertEqual(sorted(self.calls("pane close")), ["pane close p1", "pane close p2", "pane close p3"])
+        self.assertIn("SPEAK_PLAN=/work/a.md", self.calls("plugin")[-1])
+
+    def test_a_selection_whose_text_pane_fails_opens_nothing_else(self):
+        failing = fake_command(self.tmp, "herdr-fails", "#!/bin/sh\necho 'no such pane' >&2\nexit 1\n")
+        with mock.patch.dict(os.environ, {"HERDR_BIN_PATH": str(failing)}), \
+                mock.patch.object(speak, "notify") as notify:
+            speak.show_selection(Path("/s/proj/selection-1"))
+        notify.assert_called_once_with("Speak: couldn't open a pane", "no such pane")
+
 
 class PlayerCommandTest(unittest.TestCase):
     def test_mpv_stays_open_with_a_progress_bar(self):
@@ -695,6 +735,49 @@ class PlayerCommandTest(unittest.TestCase):
 
     def test_paused_starts_paused(self):
         self.assertIn("--pause", speak.player_command("/s/plan.opus", paused=True))
+
+
+class RunCaptionsTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.folder = speak.STATE_DIR / "captions"
+        self.config = speak.STATE_DIR / "sptlrx.yaml"
+
+    def lrc(self, name, text="[00:00.00]Hi.\n"):
+        path = self.tmp / name
+        path.write_text(text)
+        return path
+
+    def run_captions(self, lyrics, **patches):
+        with mock.patch.dict(os.environ, {"SPEAK_LYRICS": str(lyrics)}), \
+                mock.patch.object(speak.os, "execvp", **patches) as execvp:
+            speak.run_captions()
+        return execvp
+
+    def test_becomes_sptlrx_on_a_folder_holding_only_this_lrc(self):
+        self.lrc("other.lrc", "[00:00.00]Wrong file.\n")
+        execvp = self.run_captions(self.lrc("selection-1.lrc"))
+        execvp.assert_called_once_with("sptlrx", ["sptlrx", "--config", str(self.config)])
+        self.assertEqual([p.name for p in self.folder.iterdir()], ["selection-1.lrc"])
+        self.assertEqual((self.folder / "selection-1.lrc").read_text(), "[00:00.00]Hi.\n")
+        self.assertEqual(self.config.read_text(), speak.sptlrx_config(self.folder))
+
+    def test_a_new_selection_replaces_the_last_in_the_folder(self):
+        self.run_captions(self.lrc("selection-1.lrc"))
+        self.run_captions(self.lrc("selection-2.lrc"))
+        self.assertEqual([p.name for p in self.folder.iterdir()], ["selection-2.lrc"])
+
+    def test_a_missing_sptlrx_is_reported(self):
+        with mock.patch.object(speak, "notify") as notify:
+            self.run_captions(self.lrc("selection-1.lrc"), side_effect=FileNotFoundError("sptlrx"))
+        notify.assert_called_once_with(
+            "Speak: sptlrx not found", "Install sptlrx (sudo apt install sptlrx) to show live captions.")
+
+    def test_the_config_follows_mpv_quickly_and_reads_only_local_lyrics(self):
+        text = speak.sptlrx_config(Path("/state/cap tions"))
+        for line in ("player: mpris", "updateInterval: 250", "mpris:", "  players: [mpv]",
+                     "local:", '  folder: "/state/cap tions"', "  hAlignment: left"):
+            self.assertIn(line + "\n", text)
 
 
 class PickTest(unittest.TestCase):

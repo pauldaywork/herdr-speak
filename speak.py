@@ -13,6 +13,7 @@ import json
 import os
 import queue
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -810,7 +811,7 @@ def herdr(*args):
 
 
 def load_panes():
-    """The plan and player panes this plugin opened: {role: {"pane": id, "plan": path}}."""
+    """The panes this plugin opened: {role: {"pane": id, "plan": path}} for roles plan, captions and player."""
     try:
         return json.loads(PANES_FILE.read_text())
     except (OSError, ValueError):
@@ -861,14 +862,15 @@ def open_pane(entrypoint, direction, target, cwd, env):
 def show_plan(path):
     """Show the plan read-only beside the pane the key was pressed in.
 
-    A pane already showing this plan is kept; one showing another plan is
-    replaced, along with its player.
+    A pane already showing this plan is kept; one showing another plan or a selection is
+    replaced, along with its captions and player.
     """
     panes = load_panes()
     shown = live_pane(panes, "plan")
     if shown and shown["plan"] == path:
         return
     close_pane(panes, "plan")
+    close_pane(panes, "captions")
     close_pane(panes, "player")
     pane = open_pane("plan-view", "right", os.environ.get("SPEAK_TARGET_PANE"), Path(path).parent, {"SPEAK_PLAN": path})
     if pane:
@@ -913,6 +915,68 @@ def run_player():
         os.execvp(command[0], command)
     except OSError:
         notify("Speak: mpv not found", "Install mpv to replay and scrub saved plans.")
+
+
+def show_selection(base):
+    """Show a selection's rewrite, live captions and player in a column beside the key pane.
+
+    They replace any plan or selection panes already open, taking the plan,
+    captions and player roles, and a plan picked later replaces them.
+    """
+    panes = load_panes()
+    for role in ("plan", "captions", "player"):
+        close_pane(panes, role)
+    base = Path(base)
+    text = str(spoken_file(base, ".md"))
+    view = open_pane("text-view", "right", os.environ.get("HERDR_PANE_ID"), base.parent, {"SPEAK_TEXT": text})
+    if view:
+        panes["plan"] = {"pane": view, "plan": text}
+        captions = open_pane("captions", "down", view, base.parent,
+                             {"SPEAK_LYRICS": str(spoken_file(base, ".lrc"))})
+        if captions:
+            panes["captions"] = {"pane": captions, "plan": text}
+            player = open_pane("plan-player", "down", captions, base.parent,
+                               {"SPEAK_AUDIO": str(spoken_file(base, ".opus"))})
+            if player:
+                panes["player"] = {"pane": player, "plan": text}
+    save_panes(panes)
+
+
+def sptlrx_config(folder):
+    """sptlrx settings: follow mpv over MPRIS every 250 ms, with lyrics only from folder."""
+    return "\n".join([
+        "player: mpris",
+        "updateInterval: 250",
+        "mpris:",
+        "  players: [mpv]",
+        "local:",
+        f"  folder: {json.dumps(str(folder))}",
+        "style:",
+        "  hAlignment: left",
+        "  before: {faint: true}",
+        '  current: {bold: true, foreground: "3"}',
+        "  after: {}",
+    ]) + "\n"
+
+
+def run_captions():
+    """Run in the captions pane: become sptlrx, showing the .lrc in step with the mpv player.
+
+    sptlrx picks the .lrc whose name best matches what mpv is playing, so its
+    folder holds only this one, and its config is ours rather than the user's.
+    """
+    lyrics = Path(os.environ["SPEAK_LYRICS"])
+    folder = STATE_DIR / "captions"
+    shutil.rmtree(folder, ignore_errors=True)
+    folder.mkdir(parents=True)
+    (folder / lyrics.name).symlink_to(lyrics)
+    config = STATE_DIR / "sptlrx.yaml"
+    config.write_text(sptlrx_config(folder))
+    command = ["sptlrx", "--config", str(config)]
+    try:
+        os.execvp(command[0], command)
+    except OSError:
+        notify("Speak: sptlrx not found", "Install sptlrx (sudo apt install sptlrx) to show live captions.")
 
 
 def open_picker():
@@ -996,8 +1060,10 @@ def main(argv):
         pick()
     elif command == "player":
         run_player()
+    elif command == "captions":
+        run_captions()
     else:
-        print(f"usage: {argv[0]} toggle [--verbatim] | stop | plan | pick | player", file=sys.stderr)
+        print(f"usage: {argv[0]} toggle [--verbatim] | stop | plan | pick | player | captions", file=sys.stderr)
         return 2
     return 0
 
