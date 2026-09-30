@@ -693,8 +693,9 @@ class SpeakSelectionTest(unittest.TestCase):
         for context in ({}, {"selected_text": None}, {"selected_text": "  \n"}):
             start, notify = self.run_action(context)
             start.assert_not_called()
-            notify.assert_called_once_with("Speak: nothing selected",
-                                           "Select some text in a pane, then press the key.")
+            notify.assert_called_once_with(
+                "Speak: nothing selected",
+                "Press prefix+[ for copy mode, select the text, then press the key.")
 
     def test_pressing_it_while_preparing_only_cancels(self):
         start, notify = self.run_action({"selected_text": "Some answer."}, stopped=True)

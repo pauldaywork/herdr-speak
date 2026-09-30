@@ -752,7 +752,7 @@ def speak_selection():
     if stop():
         return
     if not (plugin_context().get("selected_text") or "").strip():
-        notify("Speak: nothing selected", "Select some text in a pane, then press the key.")
+        notify("Speak: nothing selected", "Press prefix+[ for copy mode, select the text, then press the key.")
         return
     # The worker inherits this environment, so it reads the selection from it too.
     start_worker(["--selection"])
