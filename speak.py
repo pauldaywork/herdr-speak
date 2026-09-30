@@ -26,6 +26,8 @@ STATE_DIR = Path(os.environ.get("HERDR_PLUGIN_STATE_DIR") or ROOT / ".state")
 CONFIG_DIR = Path(os.environ.get("HERDR_PLUGIN_CONFIG_DIR") or ROOT)
 PID_FILE = STATE_DIR / "worker.pid"
 LOG_FILE = STATE_DIR / "speak.log"
+PROMPT = ROOT / "prompt.md"
+PLAN_PROMPT = ROOT / "prompt-plan.md"
 
 DEFAULTS = {
     "baseUrl": "http://127.0.0.1:8880/v1",
@@ -35,6 +37,7 @@ DEFAULTS = {
     "rewrite": True,
     "rewriteModel": "haiku",
     "rewriteTimeout": 60,
+    "planRewriteTimeout": 300,  # plans are long, and the rewrite keeps every step
     "autoStart": True,
     "container": "kokoro-tts",
     "image": None,  # None picks the GPU image to match the NVIDIA GPU
@@ -267,8 +270,11 @@ def strip_markdown(text):
     return re.sub(r"[ \t]+", " ", text).strip()
 
 
-def rewrite_stream(text, config):
-    """Yield the spoken rewrite as it streams out of `claude -p`."""
+def rewrite_stream(text, config, prompt=PROMPT, timeout=None):
+    """Yield the spoken rewrite as it streams out of `claude -p`.
+
+    prompt is the system prompt file; timeout defaults to rewriteTimeout.
+    """
     env = {k: v for k, v in os.environ.items() if not k.startswith("HERDR_")}
     # Thinking delays the first words by up to a minute on long answers.
     env["MAX_THINKING_TOKENS"] = "0"
@@ -284,13 +290,13 @@ def rewrite_stream(text, config):
             "--output-format", "stream-json",
             "--include-partial-messages",
             "--verbose",
-            "--system-prompt", (ROOT / "prompt.md").read_text(),
+            "--system-prompt", prompt.read_text(),
         ],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
     )
     process.stdin.write(text)
     process.stdin.close()
-    timer = threading.Timer(config["rewriteTimeout"], process.kill)
+    timer = threading.Timer(timeout or config["rewriteTimeout"], process.kill)
     timer.start()
     try:
         for line in process.stdout:
