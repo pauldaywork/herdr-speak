@@ -87,6 +87,18 @@ class RecordingTest(unittest.TestCase):
     def test_play_without_a_recording_still_works(self):
         self.assertTrue(self.play(["Just speak."]))
 
+    def test_encoder_failure_is_caught_and_does_not_fail_playback(self):
+        # Make ffmpeg fail by using an invalid audio format.
+        bad_format = ["-f", "nosuchformat"]
+        with mock.patch.object(speak, "AUDIO_FORMAT", bad_format):
+            # Should not raise; should return True and complete playback normally.
+            result = self.play(["Speak this."], speak.Recording(self.base))
+        self.assertTrue(result)
+        # No audio or text files should exist since encoding failed.
+        self.assertFalse((self.base.parent / "v1.2-plan.opus").exists())
+        self.assertFalse((self.base.parent / "v1.2-plan.md").exists())
+        self.assertFalse((self.base.parent / "v1.2-plan.opus.part").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -389,7 +389,7 @@ class Recording:
                 "ffmpeg", "-y", "-loglevel", "error", *AUDIO_FORMAT, "-i", "-",
                 "-c:a", "libopus", "-b:a", "48k", "-f", "ogg", str(self.partial),
             ],
-            stdin=subprocess.PIPE,
+            stdin=subprocess.PIPE, stderr=subprocess.DEVNULL,
         )
 
     def add_text(self, text):
@@ -460,7 +460,10 @@ def play(chunks, config, recording=None):
         player.stdin.close()
         player.wait()
         if recording and complete and spoke:
-            recording.finish()
+            try:
+                recording.finish()
+            except (OSError, RuntimeError) as error:
+                print(f"failed to save recording: {error!r}", file=sys.stderr)
     except BrokenPipeError:
         pass
     finally:
