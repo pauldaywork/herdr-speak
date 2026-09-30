@@ -402,6 +402,18 @@ class RenderTest(unittest.TestCase):
             self.render(broken, keep_source=True)
         self.assertEqual(list(self.base.parent.iterdir()), [])
 
+    def test_a_failure_writing_the_captions_saves_nothing(self):
+        real_write = Path.write_text
+
+        def write_text(path, *args, **kwargs):
+            if path.suffix == ".lrc":
+                raise OSError("disk full")
+            return real_write(path, *args, **kwargs)
+
+        with mock.patch.object(speak.Path, "write_text", write_text), self.assertRaises(OSError):
+            self.render(lambda text, config, prompt, timeout: iter(["Spoken."]), keep_source=True)
+        self.assertEqual(list(self.base.parent.iterdir()), [])
+
     def test_an_empty_rewrite_raises_and_saves_nothing(self):
         with self.assertRaises(RuntimeError):
             self.render(lambda text, config, prompt, timeout: iter([]))

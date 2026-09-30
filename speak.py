@@ -503,7 +503,8 @@ class Recording:
             if self.encoder.poll() is None:
                 self.encoder.kill()
                 self.encoder.wait()
-        self.partial.unlink(missing_ok=True)
+        for path in (self.partial, self.raw, self.text, self.lyrics):
+            path.unlink(missing_ok=True)  # finish() may have failed after writing some
 
 
 def spoken_dir(config):
