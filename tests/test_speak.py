@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import os
 import subprocess
@@ -101,6 +103,25 @@ class RecordingTest(unittest.TestCase):
         self.assertFalse((self.base.parent / "v1.2-plan.opus").exists())
         self.assertFalse((self.base.parent / "v1.2-plan.md").exists())
         self.assertFalse((self.base.parent / "v1.2-plan.opus.part").exists())
+
+
+    def test_encoder_that_dies_midway_does_not_stop_playback(self):
+        fake_command(self.tmp, "ffmpeg", "#!/bin/sh\nexit 1\n")
+        out = self.tmp / "played.pcm"
+        config = dict(self.config, player=["sh", "-c", f"cat > '{out}'"])
+
+        def big(text, config):
+            for _ in range(5):
+                yield b"\0" * 200_000
+
+        with mock.patch.dict(os.environ, {"PATH": f"{self.tmp}:{os.environ['PATH']}"}), \
+                mock.patch.object(speak, "synthesize", big), \
+                contextlib.redirect_stderr(io.StringIO()) as note:
+            spoke = speak.play(["Speak this."], config, speak.Recording(self.base))
+        self.assertTrue(spoke)
+        self.assertEqual(note.getvalue().count("encoder failed"), 1)
+        self.assertEqual(out.stat().st_size, 1_000_000)
+        self.assertEqual(list(self.base.parent.iterdir()), [])
 
 
 class SpokenPathsTest(unittest.TestCase):

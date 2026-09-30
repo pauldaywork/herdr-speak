@@ -383,6 +383,7 @@ class Recording:
         self.parts = []
         self.encoder = None
         self.finished = False
+        self.failed = False
 
     def start(self):
         self.base.parent.mkdir(parents=True, exist_ok=True)
@@ -398,9 +399,18 @@ class Recording:
         self.parts.append(text)
 
     def write(self, audio):
-        self.encoder.stdin.write(audio)
+        """Feed the encoder; if it has died, note it once and keep playback going."""
+        if self.failed:
+            return
+        try:
+            self.encoder.stdin.write(audio)
+        except OSError as error:
+            self.failed = True
+            print(f"recording stopped, encoder failed: {error!r}", file=sys.stderr)
 
     def finish(self):
+        if self.failed:
+            return  # abort() cleans up
         self.encoder.stdin.close()
         if self.encoder.wait() != 0:
             raise RuntimeError(f"ffmpeg exited {self.encoder.returncode} saving {self.audio}")
