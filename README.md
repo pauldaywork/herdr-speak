@@ -1,6 +1,6 @@
 # herdr-speak
 
-A [herdr](https://herdr.dev/) plugin that reads the focused pane's last Claude Code or Pi answer aloud through a local [Kokoro-FastAPI](https://github.com/remsky/Kokoro-FastAPI) text-to-speech server. Press `prefix+shift+s` to hear it rewritten for listening, or `prefix+shift+v` to hear it as written. Press either key again to stop. Press `prefix+shift+p` to pick a markdown plan and hear it. Select text in a pane and press `prefix+shift+r` to hear just that part, with live captions.
+A [herdr](https://herdr.dev/) plugin that reads the focused pane's last Claude Code or Pi answer aloud through a local [Kokoro-FastAPI](https://github.com/remsky/Kokoro-FastAPI) text-to-speech server. Press `prefix+shift+s` to hear it rewritten for listening, or `prefix+shift+v` to hear it as written. Press either key again to stop. Press `prefix+shift+p` to pick a markdown plan and hear it. Select text in a pane and press `prefix+shift+a` to hear just that part, with live captions.
 
 It finds the answer from the session herdr records for the pane. While the agent is still working, it reads the last finished answer instead of the one in progress.
 
@@ -84,7 +84,7 @@ command = "speak.plan"
 description = "speak: pick a plan file and read it aloud (again to stop)"
 
 [[keys.command]]
-key = "prefix+shift+r"
+key = "prefix+shift+a"
 type = "plugin_action"
 command = "speak.selection"
 description = "speak: read the selected text aloud (again to cancel)"
