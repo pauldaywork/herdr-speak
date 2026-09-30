@@ -546,6 +546,9 @@ def play(chunks, config, recording=None):
     finally:
         if player.poll() is None and not spoke:
             player.terminate()
+        if player.stdin and not player.stdin.closed:
+            player.stdin.close()
+        player.wait()
         if recording and not recording.finished:
             recording.abort()
     return spoke
@@ -562,16 +565,18 @@ def say(text, config, verbatim=False, prompt=PROMPT, timeout=None, save_to=None)
         notify("Speak: couldn't start Kokoro", str(error))
         return
     try:
+        recording = Recording(save_to) if save_to else None
         if config["rewrite"] and not verbatim:
             try:
                 stream = rewrite_stream(text, config, prompt, timeout)
-                play(sentences(stream), config, Recording(save_to) if save_to else None)
+                play(sentences(stream), config, recording)
                 return
             except (OSError, RuntimeError) as error:
                 if isinstance(error, urllib.error.URLError):
                     raise
                 print(f"rewrite failed, reading cleaned text instead: {error!r}", file=sys.stderr)
-        play([strip_markdown(text)], config, Recording(save_to) if save_to else None)
+        # The cleaned text is a degraded fallback, so it is never saved for replay.
+        play([strip_markdown(text)], config)
     except Exception as error:  # noqa: BLE001
         notify("Speak: TTS failed", f"{config['baseUrl']}: {error}")
 

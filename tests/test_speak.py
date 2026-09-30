@@ -271,6 +271,29 @@ class WorkerPlanTest(unittest.TestCase):
         self.assertEqual(len(self.prompts), 2)
 
 
+    def test_a_failed_rewrite_speaks_the_fallback_and_saves_nothing(self):
+        spoken = []
+
+        def broken(text, config, prompt, timeout):
+            raise RuntimeError("claude exited 1")
+            yield
+
+        def record(text, config):
+            spoken.append(text)
+            yield b"\0" * 4800
+
+        with mock.patch.multiple(
+            speak,
+            load_config=lambda: self.config,
+            ensure_kokoro=lambda config: None,
+            synthesize=record,
+            rewrite_stream=broken,
+        ), mock.patch.object(speak, "play_file"), contextlib.redirect_stderr(io.StringIO()):
+            speak.worker_plan(str(self.source))
+        self.assertEqual(spoken, [speak.strip_markdown(self.source.read_text())])
+        self.assertFalse((self.tmp / "spoken").exists() and any((self.tmp / "spoken").rglob("*.*")))
+
+
 class PlanFilesTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp()).resolve()
