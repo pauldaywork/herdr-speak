@@ -313,6 +313,9 @@ def rewrite_stream(text, config, prompt=PROMPT, timeout=None):
         timer.cancel()
         if process.poll() is None:
             process.kill()
+        process.stdout.close()
+        process.stderr.close()
+        process.wait()
 
 
 SENTENCE_END = re.compile(r"[.!?][\"')\]]*\s+")
