@@ -11,7 +11,9 @@ detached worker so the herdr action returns at once.
 """
 
 import base64
+import contextlib
 import glob
+import itertools
 import json
 import os
 import queue
@@ -710,20 +712,21 @@ def worker_plan(path):
     except (OSError, UnicodeDecodeError) as error:
         notify("Speak: can't read the plan", str(error))
         return
-    try:
-        ensure_kokoro(config)
-    except (OSError, RuntimeError) as error:
-        notify("Speak: couldn't start Kokoro", str(error))
-        return
-    if config["rewrite"]:
-        notify("Speak: preparing the plan", "It plays once the audio is ready. Press the key again to cancel.")
+    with preparing("the plan"):
         try:
-            render(text, config, base, timeout=config["planRewriteTimeout"])
+            ensure_kokoro(config)
         except (OSError, RuntimeError) as error:
-            if isinstance(error, urllib.error.URLError):
-                notify("Speak: TTS failed", f"{config['baseUrl']}: {error}")
-                return
-            print(f"rewrite failed, reading cleaned text instead: {error!r}", file=sys.stderr)
+            notify("Speak: couldn't start Kokoro", str(error))
+            return
+        if config["rewrite"]:
+            notify("Speak: preparing the plan", "It plays once the audio is ready. Press the key again to cancel.")
+            try:
+                render(text, config, base, timeout=config["planRewriteTimeout"])
+            except (OSError, RuntimeError) as error:
+                if isinstance(error, urllib.error.URLError):
+                    notify("Speak: TTS failed", f"{config['baseUrl']}: {error}")
+                    return
+                print(f"rewrite failed, reading cleaned text instead: {error!r}", file=sys.stderr)
     show_plan(str(source))
     audio = saved_audio(source, base)
     if audio:
@@ -764,20 +767,21 @@ def worker_selection():
     context = plugin_context()
     text = context.get("selected_text") or ""
     base = selection_base(context.get("focused_pane_cwd") or Path.home(), config)
-    try:
-        ensure_kokoro(config)
-    except (OSError, RuntimeError) as error:
-        notify("Speak: couldn't start Kokoro", str(error))
-        return
-    notify("Speak: preparing the selection", "It plays once the audio is ready. Press the key again to cancel.")
-    try:
-        render(text, config, base, prompt=PLAN_PROMPT, timeout=config["rewriteTimeout"], keep_source=True)
-    except (OSError, RuntimeError) as error:
-        if isinstance(error, urllib.error.URLError):
-            notify("Speak: TTS failed", f"{config['baseUrl']}: {error}")
-        else:
-            notify("Speak: couldn't prepare the selection", str(error))
-        return
+    with preparing("the selection"):
+        try:
+            ensure_kokoro(config)
+        except (OSError, RuntimeError) as error:
+            notify("Speak: couldn't start Kokoro", str(error))
+            return
+        notify("Speak: preparing the selection", "It plays once the audio is ready. Press the key again to cancel.")
+        try:
+            render(text, config, base, prompt=PLAN_PROMPT, timeout=config["rewriteTimeout"], keep_source=True)
+        except (OSError, RuntimeError) as error:
+            if isinstance(error, urllib.error.URLError):
+                notify("Speak: TTS failed", f"{config['baseUrl']}: {error}")
+            else:
+                notify("Speak: couldn't prepare the selection", str(error))
+            return
     show_selection(base)
 
 
@@ -929,8 +933,10 @@ def show_plan(path):
     replaced, along with its captions and player.
     """
     panes = load_panes()
+    close_pane(panes, "preparing")
     shown = live_pane(panes, "plan")
     if shown and shown["plan"] == path:
+        save_panes(panes)
         return
     close_pane(panes, "plan")
     close_pane(panes, "captions")
@@ -993,6 +999,62 @@ def run_player():
         notify("Speak: mpv not found", "Install mpv to replay and scrub saved plans.")
 
 
+SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+
+def show_preparing(label):
+    """Open a spinner pane where the text, captions and player will appear, replacing any open ones.
+
+    label says what is preparing, such as "the plan". The picker's worker
+    targets the pane the key was pressed in through SPEAK_TARGET_PANE; the
+    selection's worker is still in that pane's environment.
+    """
+    panes = load_panes()
+    for role in ("preparing", "plan", "captions", "player"):
+        close_pane(panes, role)
+    target = os.environ.get("SPEAK_TARGET_PANE") or os.environ.get("HERDR_PANE_ID")
+    pane = open_pane("preparing", "right", target, Path.home(), {"SPEAK_LABEL": label})
+    if pane:
+        panes["preparing"] = {"pane": pane, "plan": label}
+    save_panes(panes)
+
+
+def close_preparing():
+    panes = load_panes()
+    close_pane(panes, "preparing")
+    save_panes(panes)
+
+
+@contextlib.contextmanager
+def preparing(label):
+    """Show the spinner pane while the block runs, and close it however the block ends."""
+    show_preparing(label)
+    try:
+        yield
+    finally:
+        close_preparing()
+
+
+def preparing_line(label, seconds, frame):
+    return f" {frame} Preparing {label}… {seconds}s"
+
+
+def run_preparing():
+    """Run in the spinner pane: animate until the worker closes the pane."""
+    label = os.environ.get("SPEAK_LABEL") or "the speech"
+    start = time.monotonic()
+    # Clear the pane, hide the cursor and write the hint once, under the spinner line.
+    sys.stdout.write("\x1b[2J\x1b[?25l\x1b[3;1H Press the key again to cancel.")
+    try:
+        for frame in itertools.cycle(SPINNER):
+            line = preparing_line(label, int(time.monotonic() - start), frame)
+            sys.stdout.write(f"\x1b[1;1H\x1b[2K{line}")
+            sys.stdout.flush()
+            time.sleep(0.1)
+    except (KeyboardInterrupt, BrokenPipeError):
+        pass
+
+
 def show_selection(base):
     """Show a selection's original text, live captions and player in a column beside the key pane.
 
@@ -1000,7 +1062,7 @@ def show_selection(base):
     captions and player roles, and a plan picked later replaces them.
     """
     panes = load_panes()
-    for role in ("plan", "captions", "player"):
+    for role in ("preparing", "plan", "captions", "player"):
         close_pane(panes, role)
     base = Path(base)
     text = str(spoken_file(base, ".txt"))
@@ -1147,10 +1209,12 @@ def main(argv):
         pick()
     elif command == "player":
         run_player()
+    elif command == "preparing":
+        run_preparing()
     elif command == "captions":
         run_captions()
     else:
-        print(f"usage: {argv[0]} toggle [--verbatim] | stop | plan | selection | pick | player | captions",
+        print(f"usage: {argv[0]} toggle [--verbatim] | stop | plan | selection | pick | player | captions | preparing",
               file=sys.stderr)
         return 2
     return 0

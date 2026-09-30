@@ -65,6 +65,14 @@ title = "Speak: player · space pause · ←/→ 5s · ↑/↓ 1m · q close"
 placement = "split"
 command = ["sh", "-c", "exec python3 \"$HERDR_PLUGIN_ROOT/speak.py\" player"]
 
+# Opened by a worker while it prepares a plan or selection, where its panes will
+# appear: a spinner and the seconds so far. The worker closes it when it is done.
+[[panes]]
+id = "preparing"
+title = "Speak: preparing · press the key again to cancel"
+placement = "split"
+command = ["sh", "-c", "exec python3 \"$HERDR_PLUGIN_ROOT/speak.py\" preparing"]
+
 # Opened by speak.selection under the text pane: sptlrx shows the spoken rewrite as
 # captions in step with the mpv player under it, the spoken sentence in bold. q closes it.
 [[panes]]

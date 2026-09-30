@@ -260,7 +260,8 @@ class WorkerPlanTest(unittest.TestCase):
         )
         fakes.update(patches)
         mocks = dict(play_file=mock.DEFAULT, show_plan=mock.DEFAULT, open_player=mock.DEFAULT,
-                     notify=mock.DEFAULT, play=mock.DEFAULT)
+                     notify=mock.DEFAULT, play=mock.DEFAULT,
+                     show_preparing=mock.DEFAULT, close_preparing=mock.DEFAULT)
         mocks = {name: value for name, value in mocks.items() if name not in patches}
         with mock.patch.multiple(speak, **fakes), mock.patch.multiple(speak, **mocks) as used, \
                 contextlib.redirect_stderr(io.StringIO()):
@@ -269,6 +270,16 @@ class WorkerPlanTest(unittest.TestCase):
 
     def titles(self, notify):
         return [call.args[0] for call in notify.call_args_list]
+
+    def test_a_spinner_shows_while_the_plan_prepares_and_closes_before_it_opens(self):
+        order = []
+        used = self.run_worker(
+            show_preparing=mock.Mock(side_effect=lambda label: order.append(("spinner", label))),
+            close_preparing=mock.Mock(side_effect=lambda: order.append(("close",))),
+            show_plan=mock.Mock(side_effect=lambda path: order.append(("plan",))),
+        )
+        self.assertEqual(order, [("spinner", "the plan"), ("close",), ("plan",)])
+        used["open_player"].assert_called_once()
 
     def test_first_play_rewrites_with_the_plan_prompt_and_saves_outside_the_project(self):
         self.run_worker()
@@ -727,7 +738,8 @@ class WorkerSelectionTest(unittest.TestCase):
         fakes = dict(load_config=lambda: self.config, ensure_kokoro=lambda config: None,
                      synthesize_captioned=fake_captioned, rewrite_stream=self.fake_rewrite)
         fakes.update(patches)
-        mocks = {name: mock.DEFAULT for name in ("show_selection", "notify") if name not in patches}
+        mocks = {name: mock.DEFAULT for name in ("show_selection", "notify", "show_preparing", "close_preparing")
+                 if name not in patches}
         context = {"selected_text": self.SELECTED, "focused_pane_cwd": str(self.tmp / "proj")}
         with mock.patch.dict(os.environ, {"HERDR_PLUGIN_CONTEXT_JSON": json.dumps(context)}), \
                 mock.patch.multiple(speak, **fakes), mock.patch.multiple(speak, **mocks) as used, \
@@ -773,6 +785,23 @@ class WorkerSelectionTest(unittest.TestCase):
         self.assertEqual(self.saved(), [])
         used["show_selection"].assert_not_called()
         self.assertEqual(used["notify"].call_args.args, ("Speak: couldn't prepare the selection", "claude exited 1"))
+
+    def test_a_spinner_shows_while_preparing_and_closes_before_the_panes_open(self):
+        order = []
+        self.run_worker(
+            show_preparing=mock.Mock(side_effect=lambda label: order.append(("spinner", label))),
+            close_preparing=mock.Mock(side_effect=lambda: order.append(("close",))),
+            show_selection=mock.Mock(side_effect=lambda base: order.append(("panes",))),
+        )
+        self.assertEqual(order, [("spinner", "the selection"), ("close",), ("panes",)])
+
+    def test_the_spinner_closes_when_preparing_fails(self):
+        def broken(text, config, prompt, timeout):
+            raise RuntimeError("claude exited 1")
+            yield
+
+        used = self.run_worker(rewrite_stream=broken)
+        used["close_preparing"].assert_called_once_with()
 
     def test_a_kokoro_failure_is_reported_as_tts(self):
         def down(text, config):
@@ -897,6 +926,39 @@ class PanesTest(unittest.TestCase):
         self.assertIn("--direction right", self.calls("plugin")[-1])
         self.assertTrue(self.calls("plugin")[-1].endswith("--target-pane w1"))
 
+    def test_preparing_opens_a_spinner_pane_where_the_panes_will_go(self):
+        speak.show_preparing("the selection")
+        self.assertEqual(self.calls("plugin"), [
+            "plugin pane open --plugin speak --entrypoint preparing --placement split --direction right"
+            f" --cwd {Path.home()} --env SPEAK_LABEL=the selection --no-focus --target-pane w1",
+        ])
+
+    def test_preparing_targets_the_key_pane_without_a_picker(self):
+        with mock.patch.dict(os.environ):
+            del os.environ["SPEAK_TARGET_PANE"]
+            speak.show_preparing("the selection")
+        self.assertTrue(self.calls("plugin")[-1].endswith("--target-pane w2"))
+
+    def test_preparing_replaces_open_panes(self):
+        speak.show_plan("/work/a.md")
+        speak.open_player("/work/a.md", Path("/s/a.opus"), paused=False)
+        speak.show_preparing("the plan")
+        self.assertEqual(sorted(self.calls("pane close")), ["pane close p1", "pane close p2"])
+
+    def test_the_finished_panes_replace_the_spinner(self):
+        speak.show_preparing("the selection")
+        speak.show_selection(self.saved("selection-1"))
+        self.assertEqual(self.calls("pane close"), ["pane close p1"])
+        speak.show_preparing("the plan")
+        speak.show_plan("/work/a.md")
+        self.assertIn("pane close p5", self.calls("pane close"))
+
+    def test_close_preparing_closes_only_the_spinner(self):
+        speak.show_preparing("the selection")
+        speak.close_preparing()
+        self.assertEqual(self.calls("pane close"), ["pane close p1"])
+        self.assertEqual(json.loads(speak.PANES_FILE.read_text()), {})
+
     def test_a_failure_is_reported(self):
         failing = fake_command(self.tmp, "herdr-fails", "#!/bin/sh\necho 'no such pane' >&2\nexit 1\n")
         with mock.patch.dict(os.environ, {"HERDR_BIN_PATH": str(failing)}), \
@@ -970,6 +1032,11 @@ class PlayerCommandTest(unittest.TestCase):
 
     def test_paused_starts_paused(self):
         self.assertIn("--pause", speak.player_command("/s/plan.opus", paused=True))
+
+
+class PreparingLineTest(unittest.TestCase):
+    def test_shows_the_spinner_frame_what_is_preparing_and_the_seconds(self):
+        self.assertEqual(speak.preparing_line("the selection", 7, "⠹"), " ⠹ Preparing the selection… 7s")
 
 
 class RunCaptionsTest(unittest.TestCase):
@@ -1094,6 +1161,10 @@ class ManifestTest(unittest.TestCase):
         self.assertNotIn("text-view", [p["id"] for p in self.manifest["panes"]])
         [pane] = [p for p in self.manifest["panes"] if p["id"] == "plan-view"]
         self.assertEqual(pane["command"], ["sh", "-c", 'exec nvim -R -c "set filetype=markdown" "$SPEAK_PLAN"'])
+
+    def test_the_preparing_pane_runs_speak_preparing(self):
+        [pane] = [p for p in self.manifest["panes"] if p["id"] == "preparing"]
+        self.assertTrue(pane["command"][-1].endswith('speak.py" preparing'))
 
     def test_the_captions_pane_runs_speak_captions(self):
         [pane] = [p for p in self.manifest["panes"] if p["id"] == "captions"]
