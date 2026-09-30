@@ -1006,6 +1006,20 @@ def show_selection(base):
     save_panes(panes)
 
 
+def run_text():
+    """Run in the text pane: become glow showing the rewrite, wrapped to the pane, in less.
+
+    glow's own viewer (-t) renders a file before it knows the pane width and
+    never wraps it (fixed in glow 3), so render once at this pane's width.
+    """
+    width = max(20, shutil.get_terminal_size().columns - 2)
+    command = ["glow", "-p", "-w", str(width), os.environ["SPEAK_TEXT"]]
+    try:
+        os.execvpe(command[0], command, dict(os.environ, PAGER="less -R"))
+    except OSError:
+        notify("Speak: glow not found", "Install glow (sudo apt install glow) to show the rewrite.")
+
+
 def sptlrx_config(folder):
     """sptlrx settings: follow mpv over MPRIS every 250 ms, with lyrics only from folder."""
     return "\n".join([
@@ -1141,10 +1155,12 @@ def main(argv):
         pick()
     elif command == "player":
         run_player()
+    elif command == "text":
+        run_text()
     elif command == "captions":
         run_captions()
     else:
-        print(f"usage: {argv[0]} toggle [--verbatim] | stop | plan | selection | pick | player | captions",
+        print(f"usage: {argv[0]} toggle [--verbatim] | stop | plan | selection | pick | player | captions | text",
               file=sys.stderr)
         return 2
     return 0

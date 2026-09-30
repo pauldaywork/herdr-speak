@@ -940,6 +940,30 @@ class PlayerCommandTest(unittest.TestCase):
         self.assertIn("--pause", speak.player_command("/s/plan.opus", paused=True))
 
 
+class RunTextTest(unittest.TestCase):
+    def run_text(self, columns, **patches):
+        size = os.terminal_size((columns, 24))
+        with mock.patch.dict(os.environ, {"SPEAK_TEXT": "/s/proj/selection-1.md"}), \
+                mock.patch.object(speak.shutil, "get_terminal_size", return_value=size), \
+                mock.patch.object(speak.os, "execvpe", **patches) as execvpe:
+            speak.run_text()
+        return execvpe
+
+    def test_glow_renders_the_rewrite_wrapped_to_the_pane_in_less(self):
+        [(binary, command, env)] = [call.args for call in self.run_text(60).call_args_list]
+        self.assertEqual((binary, command), ("glow", ["glow", "-p", "-w", "58", "/s/proj/selection-1.md"]))
+        self.assertEqual(env["PAGER"], "less -R")
+
+    def test_a_very_narrow_pane_still_gets_a_readable_width(self):
+        [(_, command, _)] = [call.args for call in self.run_text(12).call_args_list]
+        self.assertEqual(command[3], "20")
+
+    def test_a_missing_glow_is_reported(self):
+        with mock.patch.object(speak, "notify") as notify:
+            self.run_text(60, side_effect=FileNotFoundError("glow"))
+        notify.assert_called_once_with("Speak: glow not found", "Install glow (sudo apt install glow) to show the rewrite.")
+
+
 class RunCaptionsTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -1057,9 +1081,9 @@ class ManifestTest(unittest.TestCase):
         self.assertEqual(action["command"], ["python3", "speak.py", "selection"])
         self.assertEqual(sorted(action["contexts"]), ["pane", "selection"])
 
-    def test_the_text_pane_runs_glow_on_the_rewrite(self):
+    def test_the_text_pane_runs_speak_text(self):
         [pane] = [p for p in self.manifest["panes"] if p["id"] == "text-view"]
-        self.assertEqual(pane["command"], ["sh", "-c", 'exec glow -t "$SPEAK_TEXT"'])
+        self.assertTrue(pane["command"][-1].endswith('speak.py" text'))
 
     def test_the_captions_pane_runs_speak_captions(self):
         [pane] = [p for p in self.manifest["panes"] if p["id"] == "captions"]
