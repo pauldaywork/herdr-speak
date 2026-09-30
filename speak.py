@@ -981,7 +981,7 @@ def run_player():
 
 
 def show_selection(base):
-    """Show a selection's rewrite, live captions and player in a column beside the key pane.
+    """Show a selection's original text, live captions and player in a column beside the key pane.
 
     They replace any plan or selection panes already open, taking the plan,
     captions and player roles, and a plan picked later replaces them.
@@ -990,8 +990,8 @@ def show_selection(base):
     for role in ("plan", "captions", "player"):
         close_pane(panes, role)
     base = Path(base)
-    text = str(spoken_file(base, ".md"))
-    view = open_pane("text-view", "right", os.environ.get("HERDR_PANE_ID"), base.parent, {"SPEAK_TEXT": text})
+    text = str(spoken_file(base, ".txt"))
+    view = open_pane("plan-view", "right", os.environ.get("HERDR_PANE_ID"), base.parent, {"SPEAK_PLAN": text})
     if view:
         panes["plan"] = {"pane": view, "plan": text}
         captions = open_pane("captions", "down", view, base.parent,
@@ -1004,26 +1004,6 @@ def show_selection(base):
         if player:
             panes["player"] = {"pane": player, "plan": text}
     save_panes(panes)
-
-
-def run_text():
-    """Run in the text pane: become glow's viewer on the rewrite, wrapped to the pane.
-
-    glow keeps the markdown to re-wrap on resize only when it reads it from
-    stdin; a file path is rendered before the pane width is known and never
-    wraps. That needs glow 3; 2.1.1 still clips at the pane edge.
-    """
-    try:
-        with open(os.environ["SPEAK_TEXT"], "rb") as text:
-            os.dup2(text.fileno(), 0)
-    except OSError as error:
-        notify("Speak: can't show the rewrite", str(error))
-        return
-    command = ["glow", "-t", "-"]
-    try:
-        os.execvp(command[0], command)
-    except OSError:
-        notify("Speak: glow not found", "Install glow 3 to show the rewrite.")
 
 
 def sptlrx_config(folder):
@@ -1161,12 +1141,10 @@ def main(argv):
         pick()
     elif command == "player":
         run_player()
-    elif command == "text":
-        run_text()
     elif command == "captions":
         run_captions()
     else:
-        print(f"usage: {argv[0]} toggle [--verbatim] | stop | plan | selection | pick | player | captions | text",
+        print(f"usage: {argv[0]} toggle [--verbatim] | stop | plan | selection | pick | player | captions",
               file=sys.stderr)
         return 2
     return 0

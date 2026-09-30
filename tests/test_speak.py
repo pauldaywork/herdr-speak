@@ -877,14 +877,14 @@ class PanesTest(unittest.TestCase):
     def test_a_selection_opens_its_text_captions_and_player_in_a_column(self):
         speak.show_selection(Path("/s/proj/selection-1"))
         self.assertEqual(self.calls("plugin"), [
-            "plugin pane open --plugin speak --entrypoint text-view --placement split --direction right"
-            " --cwd /s/proj --env SPEAK_TEXT=/s/proj/selection-1.md --no-focus --target-pane w2",
+            "plugin pane open --plugin speak --entrypoint plan-view --placement split --direction right"
+            " --cwd /s/proj --env SPEAK_PLAN=/s/proj/selection-1.txt --no-focus --target-pane w2",
             "plugin pane open --plugin speak --entrypoint captions --placement split --direction down"
             " --cwd /s/proj --env SPEAK_LYRICS=/s/proj/selection-1.lrc --no-focus --target-pane p1",
             "plugin pane open --plugin speak --entrypoint plan-player --placement split --direction down"
             " --cwd /s/proj --env SPEAK_AUDIO=/s/proj/selection-1.opus --no-focus --target-pane p2",
         ])
-        entry = {"plan": "/s/proj/selection-1.md"}
+        entry = {"plan": "/s/proj/selection-1.txt"}
         self.assertEqual(json.loads(speak.PANES_FILE.read_text()), {
             "plan": dict(entry, pane="p1"), "captions": dict(entry, pane="p2"), "player": dict(entry, pane="p3"),
         })
@@ -914,7 +914,7 @@ class PanesTest(unittest.TestCase):
             speak.show_selection(Path("/s/proj/selection-1"))
         self.assertTrue(self.calls("plugin")[-1].endswith("--target-pane p1"))
         self.assertIn("--entrypoint plan-player", self.calls("plugin")[-1])
-        entry = {"plan": "/s/proj/selection-1.md"}
+        entry = {"plan": "/s/proj/selection-1.txt"}
         self.assertEqual(json.loads(speak.PANES_FILE.read_text()), {
             "plan": dict(entry, pane="p1"), "player": dict(entry, pane="p2"),
         })
@@ -938,37 +938,6 @@ class PlayerCommandTest(unittest.TestCase):
 
     def test_paused_starts_paused(self):
         self.assertIn("--pause", speak.player_command("/s/plan.opus", paused=True))
-
-
-class RunTextTest(unittest.TestCase):
-    def setUp(self):
-        self.text = Path(tempfile.mkdtemp()) / "selection-1.md"
-        self.text.write_text("The rewrite.\n")
-
-    def run_text(self, **patches):
-        with mock.patch.dict(os.environ, {"SPEAK_TEXT": str(self.text)}), \
-                mock.patch.object(speak.os, "dup2") as dup2, \
-                mock.patch.object(speak.os, "execvp", **patches) as execvp:
-            speak.run_text()
-        return dup2, execvp
-
-    def test_glow_views_the_rewrite_from_stdin_so_it_rewraps_to_the_pane(self):
-        dup2, execvp = self.run_text()
-        [(fd, target)] = [call.args for call in dup2.call_args_list]
-        self.assertEqual(target, 0)
-        execvp.assert_called_once_with("glow", ["glow", "-t", "-"])
-
-    def test_a_missing_glow_is_reported(self):
-        with mock.patch.object(speak, "notify") as notify:
-            self.run_text(side_effect=FileNotFoundError("glow"))
-        notify.assert_called_once_with("Speak: glow not found", "Install glow 3 to show the rewrite.")
-
-    def test_a_missing_rewrite_is_reported(self):
-        self.text.unlink()
-        with mock.patch.object(speak, "notify") as notify:
-            _, execvp = self.run_text()
-        execvp.assert_not_called()
-        self.assertEqual(notify.call_args.args[0], "Speak: can't show the rewrite")
 
 
 class RunCaptionsTest(unittest.TestCase):
@@ -1088,9 +1057,11 @@ class ManifestTest(unittest.TestCase):
         self.assertEqual(action["command"], ["python3", "speak.py", "selection"])
         self.assertEqual(sorted(action["contexts"]), ["pane", "selection"])
 
-    def test_the_text_pane_runs_speak_text(self):
-        [pane] = [p for p in self.manifest["panes"] if p["id"] == "text-view"]
-        self.assertTrue(pane["command"][-1].endswith('speak.py" text'))
+    def test_the_text_pane_is_nvim_highlighting_markdown(self):
+        # Plans and a selection's original text (a .txt of an agent's markdown) share it.
+        self.assertNotIn("text-view", [p["id"] for p in self.manifest["panes"]])
+        [pane] = [p for p in self.manifest["panes"] if p["id"] == "plan-view"]
+        self.assertEqual(pane["command"], ["sh", "-c", 'exec nvim -R -c "set filetype=markdown" "$SPEAK_PLAN"'])
 
     def test_the_captions_pane_runs_speak_captions(self):
         [pane] = [p for p in self.manifest["panes"] if p["id"] == "captions"]

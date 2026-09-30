@@ -48,13 +48,14 @@ title = "Speak: pick a plan"
 placement = "overlay"
 command = ["sh", "-c", "exec python3 \"$HERDR_PLUGIN_ROOT/speak.py\" pick"]
 
-# Opened by the picker to the right of the pane the key was pressed in, showing
-# the chosen plan read-only while it is spoken. Quit nvim to close it.
+# Opened to the right of the pane the key was pressed in, showing the picked plan,
+# or the text a selection started from, read-only while it is spoken. Both are
+# markdown, even a selection saved as .txt. Quit nvim to close it.
 [[panes]]
 id = "plan-view"
-title = "Speak: plan"
+title = "Speak: text"
 placement = "split"
-command = ["sh", "-c", "exec nvim -R \"$SPEAK_PLAN\""]
+command = ["sh", "-c", "exec nvim -R -c \"set filetype=markdown\" \"$SPEAK_PLAN\""]
 
 # Opened under the plan's pane once its audio is saved: mpv with a progress bar,
 # so the plan can be replayed, paused and scrubbed. q closes it.
@@ -64,15 +65,7 @@ title = "Speak: player · space pause · ←/→ 5s · ↑/↓ 1m · q close"
 placement = "split"
 command = ["sh", "-c", "exec python3 \"$HERDR_PLUGIN_ROOT/speak.py\" player"]
 
-# Opened by speak.selection to the right of the pane the key was pressed in:
-# glow's viewer shows the selection's spoken rewrite, wrapped to the pane. q closes it.
-[[panes]]
-id = "text-view"
-title = "Speak: rewrite · j/k scroll · q close"
-placement = "split"
-command = ["sh", "-c", "exec python3 \"$HERDR_PLUGIN_ROOT/speak.py\" text"]
-
-# Opened by speak.selection under the rewrite's pane: sptlrx shows the rewrite as
+# Opened by speak.selection under the text pane: sptlrx shows the spoken rewrite as
 # captions in step with the mpv player under it, the spoken sentence in bold. q closes it.
 [[panes]]
 id = "captions"
