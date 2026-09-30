@@ -109,6 +109,56 @@ class PlayTest(unittest.TestCase):
         self.assertIn("stopped partway", note.getvalue())
 
 
+class PlayStartedTest(unittest.TestCase):
+    def test_started_is_called_once_just_before_the_first_audio(self):
+        events = []
+
+        def synth(text, config):
+            events.append(("synthesize", text))
+            yield b"\0" * 4800
+
+        started = mock.Mock(side_effect=lambda: events.append(("started",)))
+        config = dict(speak.DEFAULTS, player=["sh", "-c", "cat > /dev/null"])
+        with mock.patch.object(speak, "synthesize", synth):
+            speak.play(["One.", "Two."], config, started=started)
+        started.assert_called_once_with()
+        self.assertEqual(events, [("synthesize", "One."), ("started",), ("synthesize", "Two.")])
+
+
+class SayTest(unittest.TestCase):
+    def test_started_reaches_the_player_whichever_way_it_reads(self):
+        started = mock.Mock()
+        for verbatim in (False, True):
+            with mock.patch.multiple(speak, ensure_kokoro=lambda config: None,
+                                     rewrite_stream=lambda text, config: iter(["Hi."]),
+                                     play=mock.DEFAULT) as used:
+                speak.say("# Hi", dict(speak.DEFAULTS), verbatim=verbatim, started=started)
+            self.assertIs(used["play"].call_args.kwargs["started"], started)
+
+
+class WorkerTest(unittest.TestCase):
+    def run_worker(self, answer):
+        with mock.patch.multiple(speak, load_config=lambda: dict(speak.DEFAULTS), last_answer=answer,
+                                 say=mock.DEFAULT, notify=mock.DEFAULT,
+                                 show_preparing=mock.DEFAULT, close_preparing=mock.DEFAULT) as used:
+            speak.worker(verbatim=False)
+        return used
+
+    def test_a_spinner_shows_until_speech_starts_and_leaves_other_panes_open(self):
+        used = self.run_worker(lambda: "The answer.")
+        used["show_preparing"].assert_called_once_with("the answer", replace=False)
+        self.assertIs(used["say"].call_args.kwargs["started"], used["close_preparing"])
+        used["close_preparing"].assert_called_with()  # and once more when speech ends or fails
+
+    def test_nothing_to_read_shows_no_spinner(self):
+        def missing():
+            raise RuntimeError("The agent hasn't written an answer yet.")
+
+        used = self.run_worker(missing)
+        used["show_preparing"].assert_not_called()
+        self.assertEqual(used["notify"].call_args.args[0], "Speak: nothing to read")
+
+
 class SpokenPathsTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -274,11 +324,11 @@ class WorkerPlanTest(unittest.TestCase):
     def test_a_spinner_shows_while_the_plan_prepares_and_closes_before_it_opens(self):
         order = []
         used = self.run_worker(
-            show_preparing=mock.Mock(side_effect=lambda label: order.append(("spinner", label))),
+            show_preparing=mock.Mock(side_effect=lambda label, replace: order.append(("spinner", label, replace))),
             close_preparing=mock.Mock(side_effect=lambda: order.append(("close",))),
             show_plan=mock.Mock(side_effect=lambda path: order.append(("plan",))),
         )
-        self.assertEqual(order, [("spinner", "the plan"), ("close",), ("plan",)])
+        self.assertEqual(order, [("spinner", "the plan", True), ("close",), ("plan",)])
         used["open_player"].assert_called_once()
 
     def test_first_play_rewrites_with_the_plan_prompt_and_saves_outside_the_project(self):
@@ -789,11 +839,11 @@ class WorkerSelectionTest(unittest.TestCase):
     def test_a_spinner_shows_while_preparing_and_closes_before_the_panes_open(self):
         order = []
         self.run_worker(
-            show_preparing=mock.Mock(side_effect=lambda label: order.append(("spinner", label))),
+            show_preparing=mock.Mock(side_effect=lambda label, replace: order.append(("spinner", label, replace))),
             close_preparing=mock.Mock(side_effect=lambda: order.append(("close",))),
             show_selection=mock.Mock(side_effect=lambda base: order.append(("panes",))),
         )
-        self.assertEqual(order, [("spinner", "the selection"), ("close",), ("panes",)])
+        self.assertEqual(order, [("spinner", "the selection", True), ("close",), ("panes",)])
 
     def test_the_spinner_closes_when_preparing_fails(self):
         def broken(text, config, prompt, timeout):
@@ -938,6 +988,12 @@ class PanesTest(unittest.TestCase):
             del os.environ["SPEAK_TARGET_PANE"]
             speak.show_preparing("the selection")
         self.assertTrue(self.calls("plugin")[-1].endswith("--target-pane w2"))
+
+    def test_a_spinner_that_replaces_nothing_leaves_open_panes_alone(self):
+        speak.show_plan("/work/a.md")
+        speak.show_preparing("the answer", replace=False)
+        self.assertEqual(self.calls("pane close"), [])
+        self.assertIn("--entrypoint preparing", self.calls("plugin")[-1])
 
     def test_preparing_replaces_open_panes(self):
         speak.show_plan("/work/a.md")

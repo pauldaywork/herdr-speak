@@ -586,11 +586,12 @@ def play_file(audio, config):
         raise RuntimeError(f"ffmpeg exited {decoder.returncode}, player exited {player.returncode}")
 
 
-def play(chunks, config):
+def play(chunks, config, started=None):
     """Speak each text chunk in order through one player process.
 
     Chunks are pulled on a separate thread so the rewrite keeps streaming while
-    earlier sentences play.
+    earlier sentences play. started, if given, is called once, just before the
+    first audio reaches the player.
     """
     pending = queue.Queue()
 
@@ -616,6 +617,9 @@ def play(chunks, config):
                 print(f"stopped partway: {item!r}", file=sys.stderr)
                 break
             for audio in synthesize(item, config):
+                if started:
+                    started()
+                    started = None
                 player.stdin.write(audio)
             spoke = True
         player.stdin.close()
@@ -631,8 +635,11 @@ def play(chunks, config):
     return spoke
 
 
-def say(text, config, verbatim=False):
-    """Rewrite text for listening and play it, reading the cleaned text if the rewrite fails."""
+def say(text, config, verbatim=False, started=None):
+    """Rewrite text for listening and play it, reading the cleaned text if the rewrite fails.
+
+    started is passed on to play(), to learn when speech begins.
+    """
     try:
         ensure_kokoro(config)
     except (OSError, RuntimeError) as error:
@@ -641,13 +648,13 @@ def say(text, config, verbatim=False):
     try:
         if config["rewrite"] and not verbatim:
             try:
-                play(sentences(rewrite_stream(text, config)), config)
+                play(sentences(rewrite_stream(text, config)), config, started=started)
                 return
             except (OSError, RuntimeError) as error:
                 if isinstance(error, urllib.error.URLError):
                     raise
                 print(f"rewrite failed, reading cleaned text instead: {error!r}", file=sys.stderr)
-        play([strip_markdown(text)], config)
+        play([strip_markdown(text)], config, started=started)
     except Exception as error:  # noqa: BLE001
         notify("Speak: TTS failed", f"{config['baseUrl']}: {error}")
 
@@ -659,7 +666,9 @@ def worker(verbatim):
     except Exception as error:  # noqa: BLE001 - every failure becomes a notification
         notify("Speak: nothing to read", str(error))
         return
-    say(text, config, verbatim=verbatim)
+    # Nothing else opens for an answer, so leave any plan or selection panes be.
+    with preparing("the answer", replace=False):
+        say(text, config, verbatim=verbatim, started=close_preparing)
 
 
 def render(text, config, base, prompt=PLAN_PROMPT, timeout=None, keep_source=False):
@@ -1002,15 +1011,16 @@ def run_player():
 SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 
-def show_preparing(label):
-    """Open a spinner pane where the text, captions and player will appear, replacing any open ones.
+def show_preparing(label, replace=True):
+    """Open a spinner pane beside the pane the key was pressed in.
 
-    label says what is preparing, such as "the plan". The picker's worker
-    targets the pane the key was pressed in through SPEAK_TARGET_PANE; the
-    selection's worker is still in that pane's environment.
+    label says what is preparing, such as "the plan". With replace, it takes
+    the place of any open text, captions and player panes, which the finished
+    ones will replace. The picker's worker targets the key's pane through
+    SPEAK_TARGET_PANE; the other workers are still in that pane's environment.
     """
     panes = load_panes()
-    for role in ("preparing", "plan", "captions", "player"):
+    for role in ("preparing", "plan", "captions", "player") if replace else ("preparing",):
         close_pane(panes, role)
     target = os.environ.get("SPEAK_TARGET_PANE") or os.environ.get("HERDR_PANE_ID")
     pane = open_pane("preparing", "right", target, Path.home(), {"SPEAK_LABEL": label})
@@ -1026,9 +1036,9 @@ def close_preparing():
 
 
 @contextlib.contextmanager
-def preparing(label):
+def preparing(label, replace=True):
     """Show the spinner pane while the block runs, and close it however the block ends."""
-    show_preparing(label)
+    show_preparing(label, replace=replace)
     try:
         yield
     finally:
