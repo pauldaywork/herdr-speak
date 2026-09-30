@@ -65,7 +65,7 @@ placement = "split"
 command = ["sh", "-c", "exec python3 \"$HERDR_PLUGIN_ROOT/speak.py\" player"]
 
 # Opened by speak.selection to the right of the pane the key was pressed in:
-# glow renders the selection's spoken rewrite wrapped to the pane, in less. q closes it.
+# glow's viewer shows the selection's spoken rewrite, wrapped to the pane. q closes it.
 [[panes]]
 id = "text-view"
 title = "Speak: rewrite · j/k scroll · q close"

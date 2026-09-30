@@ -941,27 +941,34 @@ class PlayerCommandTest(unittest.TestCase):
 
 
 class RunTextTest(unittest.TestCase):
-    def run_text(self, columns, **patches):
-        size = os.terminal_size((columns, 24))
-        with mock.patch.dict(os.environ, {"SPEAK_TEXT": "/s/proj/selection-1.md"}), \
-                mock.patch.object(speak.shutil, "get_terminal_size", return_value=size), \
-                mock.patch.object(speak.os, "execvpe", **patches) as execvpe:
+    def setUp(self):
+        self.text = Path(tempfile.mkdtemp()) / "selection-1.md"
+        self.text.write_text("The rewrite.\n")
+
+    def run_text(self, **patches):
+        with mock.patch.dict(os.environ, {"SPEAK_TEXT": str(self.text)}), \
+                mock.patch.object(speak.os, "dup2") as dup2, \
+                mock.patch.object(speak.os, "execvp", **patches) as execvp:
             speak.run_text()
-        return execvpe
+        return dup2, execvp
 
-    def test_glow_renders_the_rewrite_wrapped_to_the_pane_in_less(self):
-        [(binary, command, env)] = [call.args for call in self.run_text(60).call_args_list]
-        self.assertEqual((binary, command), ("glow", ["glow", "-p", "-w", "58", "/s/proj/selection-1.md"]))
-        self.assertEqual(env["PAGER"], "less -R")
-
-    def test_a_very_narrow_pane_still_gets_a_readable_width(self):
-        [(_, command, _)] = [call.args for call in self.run_text(12).call_args_list]
-        self.assertEqual(command[3], "20")
+    def test_glow_views_the_rewrite_from_stdin_so_it_rewraps_to_the_pane(self):
+        dup2, execvp = self.run_text()
+        [(fd, target)] = [call.args for call in dup2.call_args_list]
+        self.assertEqual(target, 0)
+        execvp.assert_called_once_with("glow", ["glow", "-t", "-"])
 
     def test_a_missing_glow_is_reported(self):
         with mock.patch.object(speak, "notify") as notify:
-            self.run_text(60, side_effect=FileNotFoundError("glow"))
-        notify.assert_called_once_with("Speak: glow not found", "Install glow (sudo apt install glow) to show the rewrite.")
+            self.run_text(side_effect=FileNotFoundError("glow"))
+        notify.assert_called_once_with("Speak: glow not found", "Install glow 3 to show the rewrite.")
+
+    def test_a_missing_rewrite_is_reported(self):
+        self.text.unlink()
+        with mock.patch.object(speak, "notify") as notify:
+            _, execvp = self.run_text()
+        execvp.assert_not_called()
+        self.assertEqual(notify.call_args.args[0], "Speak: can't show the rewrite")
 
 
 class RunCaptionsTest(unittest.TestCase):

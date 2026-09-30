@@ -32,7 +32,7 @@ Each selection is saved as `spoken/<project>/selection-<date>-<time>` with four 
 
 - herdr 0.9.1 or newer, with the Claude integration installed (`herdr integration install claude`).
 - A Kokoro-FastAPI server, by default at `http://127.0.0.1:8880/v1`, with the `/dev/captioned_speech` endpoint for the word timings behind captions (without it, captions fall back to one line per chunk).
-- `python3`, `ffplay` and `ffmpeg` (with libopus) from FFmpeg, `fzf` for the plan picker, `nvim` to show the plan, `mpv` for the replay player, `glow`, `sptlrx` and `mpv-mpris` for a selection's text and live captions (`sudo apt install glow sptlrx mpv-mpris`), and the `claude` CLI signed in.
+- `python3`, `ffplay` and `ffmpeg` (with libopus) from FFmpeg, `fzf` for the plan picker, `nvim` to show the plan, `mpv` for the replay player, `sptlrx` and `mpv-mpris` for a selection's live captions (`sudo apt install sptlrx mpv-mpris`), and glow 3 or newer for its text: install `glow_*_amd64.deb` from [glow's releases](https://github.com/charmbracelet/glow/releases), because Ubuntu's glow 2.1.1 doesn't wrap text in its viewer, and the `claude` CLI signed in.
 
 ## Start Kokoro on an NVIDIA GPU
 

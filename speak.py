@@ -1007,17 +1007,23 @@ def show_selection(base):
 
 
 def run_text():
-    """Run in the text pane: become glow showing the rewrite, wrapped to the pane, in less.
+    """Run in the text pane: become glow's viewer on the rewrite, wrapped to the pane.
 
-    glow's own viewer (-t) renders a file before it knows the pane width and
-    never wraps it (fixed in glow 3), so render once at this pane's width.
+    glow keeps the markdown to re-wrap on resize only when it reads it from
+    stdin; a file path is rendered before the pane width is known and never
+    wraps. That needs glow 3; 2.1.1 still clips at the pane edge.
     """
-    width = max(20, shutil.get_terminal_size().columns - 2)
-    command = ["glow", "-p", "-w", str(width), os.environ["SPEAK_TEXT"]]
     try:
-        os.execvpe(command[0], command, dict(os.environ, PAGER="less -R"))
+        with open(os.environ["SPEAK_TEXT"], "rb") as text:
+            os.dup2(text.fileno(), 0)
+    except OSError as error:
+        notify("Speak: can't show the rewrite", str(error))
+        return
+    command = ["glow", "-t", "-"]
+    try:
+        os.execvp(command[0], command)
     except OSError:
-        notify("Speak: glow not found", "Install glow (sudo apt install glow) to show the rewrite.")
+        notify("Speak: glow not found", "Install glow 3 to show the rewrite.")
 
 
 def sptlrx_config(folder):
