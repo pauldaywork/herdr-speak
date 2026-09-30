@@ -1,7 +1,7 @@
 id = "speak"
 name = "Speak"
 version = "0.1.0"
-min_herdr_version = "0.7.0"
+min_herdr_version = "0.9.1"
 description = "Read the focused agent's last answer aloud through a local Kokoro TTS server"
 platforms = ["linux", "macos"]
 
@@ -31,6 +31,14 @@ id = "plan"
 title = "Speak: pick a plan file and read it aloud (again to stop)"
 contexts = ["pane"]
 command = ["python3", "speak.py", "plan"]
+
+# Select text in a pane, then press to hear it rewritten, shown beside the pane
+# with live captions and a player; press again while it is preparing to cancel.
+[[actions]]
+id = "selection"
+title = "Speak: read the selected text aloud (again to cancel preparing)"
+contexts = ["pane", "selection"]
+command = ["python3", "speak.py", "selection"]
 
 # Opened by the plan action in the focused pane's cwd, so it reaches speak.py
 # through HERDR_PLUGIN_ROOT rather than a relative path.

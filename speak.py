@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""Read the focused herdr pane's last agent answer, or a chosen plan file, aloud via Kokoro.
+"""Read the focused herdr pane's last agent answer, a chosen plan file, or selected text aloud via Kokoro.
 
 `speak.py toggle [--verbatim]` starts speaking, or stops speech already in
 progress. `speak.py stop` only stops. `speak.py plan` stops speech in progress,
 or opens a picker pane (`speak.py pick`) whose choice is spoken and saved for
-replay. The work runs in a detached worker so the herdr action returns at once.
+replay. `speak.py selection` cancels a selection being prepared, or rewrites
+the selected text and shows it beside the pane with live captions
+(`speak.py captions`) and a player (`speak.py player`). The work runs in a
+detached worker so the herdr action returns at once.
 """
 
 import base64
@@ -718,6 +721,54 @@ def worker_plan(path):
         say(text, config, verbatim=True)
 
 
+# --- Speaking a selection ------------------------------------------------------
+
+
+def selection_base(cwd, config, now=None):
+    """Base path for a selection's saved files: <spoken dir>/<project>/selection-<date>-<time>.
+
+    The project follows spoken_location's rule for the pane's folder, so every
+    worktree of a repository shares one.
+    """
+    project, _ = spoken_location(Path(cwd) / "selection")
+    stamp = time.strftime("%Y-%m-%d-%H%M%S", time.localtime(now))
+    return spoken_dir(config) / project / f"selection-{stamp}"
+
+
+def speak_selection():
+    """The speak.selection action: cancel a selection being prepared, otherwise prepare this one."""
+    if stop():
+        return
+    if not (plugin_context().get("selected_text") or "").strip():
+        notify("Speak: nothing selected", "Select some text in a pane, then press the key.")
+        return
+    # The worker inherits this environment, so it reads the selection from it too.
+    start_worker(["--selection"])
+
+
+def worker_selection():
+    """Rewrite the selected text and save its speech, then show it with captions and a player."""
+    config = load_config()
+    context = plugin_context()
+    text = context.get("selected_text") or ""
+    base = selection_base(context.get("focused_pane_cwd") or Path.home(), config)
+    try:
+        ensure_kokoro(config)
+    except (OSError, RuntimeError) as error:
+        notify("Speak: couldn't start Kokoro", str(error))
+        return
+    notify("Speak: preparing the selection", "It plays once the audio is ready. Press the key again to cancel.")
+    try:
+        render(text, config, base, prompt=PLAN_PROMPT, timeout=config["rewriteTimeout"], keep_source=True)
+    except (OSError, RuntimeError) as error:
+        if isinstance(error, urllib.error.URLError):
+            notify("Speak: TTS failed", f"{config['baseUrl']}: {error}")
+        else:
+            notify("Speak: couldn't prepare the selection", str(error))
+        return
+    show_selection(base)
+
+
 # --- Picking a plan ------------------------------------------------------------
 
 SKIP_DIRS = {"node_modules", "vendor", "target", "dist", "build", "venv", "__pycache__"}
@@ -979,15 +1030,19 @@ def run_captions():
         notify("Speak: sptlrx not found", "Install sptlrx (sudo apt install sptlrx) to show live captions.")
 
 
+def plugin_context():
+    """herdr's context for this invocation, or {} when it is missing or unreadable."""
+    try:
+        return json.loads(os.environ.get("HERDR_PLUGIN_CONTEXT_JSON") or "{}")
+    except ValueError:
+        return {}
+
+
 def open_picker():
     """The speak.plan action: stop speech in progress, otherwise open the plan picker."""
     if stop():
         return
-    try:
-        context = json.loads(os.environ.get("HERDR_PLUGIN_CONTEXT_JSON") or "{}")
-    except ValueError:
-        context = {}
-    cwd = context.get("focused_pane_cwd") or str(Path.home())
+    cwd = plugin_context().get("focused_pane_cwd") or str(Path.home())
     args = [
         "plugin", "pane", "open", "--plugin", os.environ.get("HERDR_PLUGIN_ID") or "speak",
         "--entrypoint", "plan-picker", "--placement", "overlay", "--cwd", cwd, "--focus",
@@ -1049,6 +1104,8 @@ def main(argv):
         try:
             if "--plan" in argv:
                 worker_plan(argv[argv.index("--plan") + 1])
+            elif "--selection" in argv:
+                worker_selection()
             else:
                 worker(verbatim)
         finally:
@@ -1056,6 +1113,8 @@ def main(argv):
                 PID_FILE.unlink(missing_ok=True)
     elif command == "plan":
         open_picker()
+    elif command == "selection":
+        speak_selection()
     elif command == "pick":
         pick()
     elif command == "player":
@@ -1063,7 +1122,8 @@ def main(argv):
     elif command == "captions":
         run_captions()
     else:
-        print(f"usage: {argv[0]} toggle [--verbatim] | stop | plan | pick | player | captions", file=sys.stderr)
+        print(f"usage: {argv[0]} toggle [--verbatim] | stop | plan | selection | pick | player | captions",
+              file=sys.stderr)
         return 2
     return 0
 

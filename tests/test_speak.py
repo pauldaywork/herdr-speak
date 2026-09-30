@@ -190,6 +190,32 @@ class SpokenPathsTest(unittest.TestCase):
         self.assertIsNone(speak.saved_audio(source, base))
 
 
+class SelectionBaseTest(unittest.TestCase):
+    NOW = time.mktime((2026, 9, 30, 13, 30, 5, 0, 0, -1))
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.config = dict(speak.DEFAULTS, spokenDir=str(self.tmp / "spoken"))
+
+    def git(self, *args):
+        subprocess.run(["git", *args], check=True, capture_output=True)
+
+    def test_named_by_date_and_time_under_the_main_repository(self):
+        repo = self.tmp / "myrepo"
+        self.git("init", "-q", str(repo))
+        self.git("-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t",
+                 "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "init")
+        self.git("-C", str(repo), "worktree", "add", "-q", str(self.tmp / "wt-feature"))
+        (self.tmp / "wt-feature" / "src").mkdir()
+        base = speak.selection_base(self.tmp / "wt-feature" / "src", self.config, self.NOW)
+        self.assertEqual(base, self.tmp / "spoken" / "myrepo" / "selection-2026-09-30-133005")
+
+    def test_outside_git_the_project_is_the_folder_name(self):
+        (self.tmp / "notes").mkdir()
+        base = speak.selection_base(self.tmp / "notes", self.config, self.NOW)
+        self.assertEqual(base, self.tmp / "spoken" / "notes" / "selection-2026-09-30-133005")
+
+
 class PlayFileTest(unittest.TestCase):
     def test_saved_audio_is_decoded_into_the_player(self):
         tmp = Path(tempfile.mkdtemp())
@@ -602,6 +628,123 @@ esac
 """
 
 
+class SpeakSelectionTest(unittest.TestCase):
+    def run_action(self, context, stopped=False):
+        env = {"HERDR_PLUGIN_CONTEXT_JSON": json.dumps(context)}
+        with mock.patch.dict(os.environ, env), \
+                mock.patch.object(speak, "stop", return_value=stopped), \
+                mock.patch.object(speak, "start_worker") as start, \
+                mock.patch.object(speak, "notify") as notify:
+            speak.speak_selection()
+        return start, notify
+
+    def test_a_selection_is_handed_to_a_worker(self):
+        start, notify = self.run_action({"selected_text": "Some answer.", "focused_pane_cwd": "/w"})
+        start.assert_called_once_with(["--selection"])
+        notify.assert_not_called()
+
+    def test_nothing_selected_is_reported(self):
+        for context in ({}, {"selected_text": None}, {"selected_text": "  \n"}):
+            start, notify = self.run_action(context)
+            start.assert_not_called()
+            notify.assert_called_once_with("Speak: nothing selected",
+                                           "Select some text in a pane, then press the key.")
+
+    def test_pressing_it_while_preparing_only_cancels(self):
+        start, notify = self.run_action({"selected_text": "Some answer."}, stopped=True)
+        start.assert_not_called()
+        notify.assert_not_called()
+
+    def test_the_cli_command_runs_the_action(self):
+        with mock.patch.dict(os.environ, {"HERDR_PLUGIN_CONTEXT_JSON": "{}"}), \
+                mock.patch.object(speak, "stop", return_value=False), \
+                mock.patch.object(speak, "notify") as notify:
+            self.assertEqual(speak.main(["speak.py", "selection"]), 0)
+        self.assertEqual(notify.call_args.args[0], "Speak: nothing selected")
+
+
+class WorkerSelectionTest(unittest.TestCase):
+    SELECTED = "The **selected** part of an answer."
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        (self.tmp / "proj").mkdir()
+        self.config = dict(speak.DEFAULTS, spokenDir=str(self.tmp / "spoken"))
+        self.rewrites = []
+
+    def fake_rewrite(self, text, config, prompt, timeout):
+        self.rewrites.append((text, prompt, timeout))
+        return iter(["The selected part. Said aloud."])
+
+    def run_worker(self, **patches):
+        fakes = dict(load_config=lambda: self.config, ensure_kokoro=lambda config: None,
+                     synthesize_captioned=fake_captioned, rewrite_stream=self.fake_rewrite)
+        fakes.update(patches)
+        mocks = {name: mock.DEFAULT for name in ("show_selection", "notify") if name not in patches}
+        context = {"selected_text": self.SELECTED, "focused_pane_cwd": str(self.tmp / "proj")}
+        with mock.patch.dict(os.environ, {"HERDR_PLUGIN_CONTEXT_JSON": json.dumps(context)}), \
+                mock.patch.multiple(speak, **fakes), mock.patch.multiple(speak, **mocks) as used, \
+                contextlib.redirect_stderr(io.StringIO()):
+            speak.worker_selection()
+        return used
+
+    def saved(self):
+        folder = self.tmp / "spoken" / "proj"
+        return sorted(p.name for p in folder.iterdir()) if folder.exists() else []
+
+    def test_saves_the_selection_its_rewrite_captions_and_audio(self):
+        self.run_worker()
+        names = self.saved()
+        self.assertEqual(len(names), 4)
+        self.assertRegex(names[0], r"^selection-\d{4}-\d\d-\d\d-\d{6}\.lrc$")
+        stem = names[0][:-len(".lrc")]
+        self.assertEqual(names, [f"{stem}.lrc", f"{stem}.md", f"{stem}.opus", f"{stem}.txt"])
+        folder = self.tmp / "spoken" / "proj"
+        self.assertEqual((folder / f"{stem}.txt").read_text(), self.SELECTED)
+        self.assertEqual((folder / f"{stem}.md").read_text(), "The selected part. Said aloud.\n")
+
+    def test_rewrites_with_the_plan_prompt_and_the_answer_timeout(self):
+        self.run_worker()
+        self.assertEqual(self.rewrites, [(self.SELECTED, speak.PLAN_PROMPT, 60)])
+
+    def test_shows_the_panes_once_the_audio_is_saved(self):
+        def show(base):
+            self.assertTrue(speak.spoken_file(base, ".opus").exists(), "the panes opened before the audio was saved")
+
+        shown = mock.Mock(side_effect=show)
+        used = self.run_worker(show_selection=shown)
+        [call] = shown.call_args_list
+        self.assertRegex(call.args[0].name, r"^selection-\d{4}-\d\d-\d\d-\d{6}$")
+        self.assertEqual([c.args[0] for c in used["notify"].call_args_list], ["Speak: preparing the selection"])
+
+    def test_a_failed_rewrite_is_reported_and_saves_and_shows_nothing(self):
+        def broken(text, config, prompt, timeout):
+            yield "The selected part. "
+            raise RuntimeError("claude exited 1")
+
+        used = self.run_worker(rewrite_stream=broken)
+        self.assertEqual(self.saved(), [])
+        used["show_selection"].assert_not_called()
+        self.assertEqual(used["notify"].call_args.args, ("Speak: couldn't prepare the selection", "claude exited 1"))
+
+    def test_a_kokoro_failure_is_reported_as_tts(self):
+        def down(text, config):
+            raise speak.urllib.error.URLError("connection refused")
+
+        used = self.run_worker(synthesize_captioned=down)
+        self.assertEqual(used["notify"].call_args.args[0], "Speak: TTS failed")
+        used["show_selection"].assert_not_called()
+        self.assertEqual(self.saved(), [])
+
+    def test_kokoro_not_starting_is_reported(self):
+        def fails(config):
+            raise RuntimeError("docker start failed")
+
+        used = self.run_worker(ensure_kokoro=fails)
+        self.assertEqual(used["notify"].call_args.args, ("Speak: couldn't start Kokoro", "docker start failed"))
+        self.assertEqual(self.rewrites, [])
+
+
 class PanesTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -842,6 +985,28 @@ class PickTest(unittest.TestCase):
         self.start.assert_not_called()
         self.show.assert_not_called()
         self.player.assert_not_called()
+
+
+class ManifestTest(unittest.TestCase):
+    def setUp(self):
+        import tomllib
+        self.manifest = tomllib.loads((ROOT / "herdr-plugin.toml").read_text())
+
+    def test_the_selection_action_runs_in_panes_and_the_selection_menu(self):
+        [action] = [a for a in self.manifest["actions"] if a["id"] == "selection"]
+        self.assertEqual(action["command"], ["python3", "speak.py", "selection"])
+        self.assertEqual(sorted(action["contexts"]), ["pane", "selection"])
+
+    def test_the_text_pane_runs_glow_on_the_rewrite(self):
+        [pane] = [p for p in self.manifest["panes"] if p["id"] == "text-view"]
+        self.assertEqual(pane["command"], ["sh", "-c", 'exec glow -t "$SPEAK_TEXT"'])
+
+    def test_the_captions_pane_runs_speak_captions(self):
+        [pane] = [p for p in self.manifest["panes"] if p["id"] == "captions"]
+        self.assertTrue(pane["command"][-1].endswith('speak.py" captions'))
+
+    def test_requires_the_herdr_the_selection_context_was_checked_on(self):
+        self.assertEqual(self.manifest["min_herdr_version"], "0.9.1")
 
 
 if __name__ == "__main__":

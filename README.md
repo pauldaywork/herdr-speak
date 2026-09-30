@@ -1,6 +1,6 @@
 # herdr-speak
 
-A [herdr](https://herdr.dev/) plugin that reads the focused pane's last Claude Code or Pi answer aloud through a local [Kokoro-FastAPI](https://github.com/remsky/Kokoro-FastAPI) text-to-speech server. Press `prefix+shift+s` to hear it rewritten for listening, or `prefix+shift+v` to hear it as written. Press either key again to stop. Press `prefix+shift+p` to pick a markdown plan and hear it.
+A [herdr](https://herdr.dev/) plugin that reads the focused pane's last Claude Code or Pi answer aloud through a local [Kokoro-FastAPI](https://github.com/remsky/Kokoro-FastAPI) text-to-speech server. Press `prefix+shift+s` to hear it rewritten for listening, or `prefix+shift+v` to hear it as written. Press either key again to stop. Press `prefix+shift+p` to pick a markdown plan and hear it. Select text in a pane and press `prefix+shift+r` to hear just that part, with live captions.
 
 It finds the answer from the session herdr records for the pane. While the agent is still working, it reads the last finished answer instead of the one in progress.
 
@@ -14,18 +14,24 @@ The plugin then prepares the audio: it rewrites the plan with `prompt-plan.md`, 
 
 The spoken text, its captions and the audio are saved as `spoken/<project>/<name>.md`, `.lrc` and `.opus` in the plugin state directory. The `.lrc` has one line per spoken sentence, stamped with the time Kokoro started saying it (from Kokoro-FastAPI's `/dev/captioned_speech` word timings), so players such as sptlrx and mpv can show the text in step with the audio. That is outside every project and outside `~/.claude`, so an agent never mistakes them for a new plan. The project is the repository name, the same for every worktree of that repository, or the folder name for a file outside git (so files in `~/.claude/plans` land in `spoken/plans/`). The name is the file's path within the repository, with `--` between folders, so `docs/README.md` is saved as `docs--README` and doesn't collide with `README.md`. Picking a plan whose saved audio is newer than the file skips the preparation and plays it straight away. Picking the same plan again reuses its panes; picking another plan replaces them.
 
+`speak.selection` reads the text you selected in the focused pane. It rewrites the selection with `prompt-plan.md` and prepares the audio, which takes a few seconds; a notification says so, and pressing the key again cancels it. Then three panes open in a column to the right, without taking focus: the whole spoken rewrite rendered by [glow](https://github.com/charmbracelet/glow), live captions from [sptlrx](https://github.com/raitonoberu/sptlrx) that highlight the sentence being spoken, and the `mpv` player, already playing. Pause and seek in the player and the captions follow. `q` closes each pane. A selection replaces an open plan's panes, and picking a plan replaces the selection's. If nothing is selected, a notification says so.
+
+Each selection is saved as `spoken/<project>/selection-<date>-<time>` with four files: `.txt` (the text you selected), `.md` (the spoken rewrite), `.lrc` (its captions) and `.opus`. The project is named the same way as for plans, from the focused pane's folder. A run that is cancelled or fails saves nothing. sptlrx runs with its own settings from the plugin state directory, so your own sptlrx config is left alone.
+
 | Action | What it does |
 | --- | --- |
 | `speak.last` | Speak the last answer, rewritten for listening. Invoke again to stop. |
 | `speak.last-verbatim` | Speak the last answer as written, with markdown and code removed. |
 | `speak.plan` | Pick a markdown plan, prepare its audio, then show it beside the pane with a player. Invoke again to cancel preparing. |
+| `speak.selection` | Speak the selected text, rewritten for listening, and show it beside the pane with live captions and a player. Invoke again to cancel preparing. |
 | `speak.stop` | Stop playback. |
 
 ## Requirements
 
-- herdr 0.7 or newer, with the Claude integration installed (`herdr integration install claude`).
+- herdr 0.9.1 or newer, with the Claude integration installed (`herdr integration install claude`).
 - A Kokoro-FastAPI server, by default at `http://127.0.0.1:8880/v1`.
-- `python3`, `ffplay` and `ffmpeg` (with libopus) from FFmpeg, `fzf` for the plan picker, `nvim` to show the plan, `mpv` for the replay player, and the `claude` CLI signed in.
+- A Kokoro-FastAPI server with the `/dev/captioned_speech` endpoint, which gives the word timings behind the captions.
+- `python3`, `ffplay` and `ffmpeg` (with libopus) from FFmpeg, `fzf` for the plan picker, `nvim` to show the plan, `mpv` for the replay player, `glow`, `sptlrx` and `mpv-mpris` for a selection's text and live captions (`sudo apt install glow sptlrx mpv-mpris`), and the `claude` CLI signed in.
 
 ## Start Kokoro on an NVIDIA GPU
 
@@ -77,6 +83,12 @@ key = "prefix+shift+p"
 type = "plugin_action"
 command = "speak.plan"
 description = "speak: pick a plan file and read it aloud (again to stop)"
+
+[[keys.command]]
+key = "prefix+shift+r"
+type = "plugin_action"
+command = "speak.selection"
+description = "speak: read the selected text aloud (again to cancel)"
 ```
 
 Either key stops speech that is already playing, whichever one started it.
