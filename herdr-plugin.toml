@@ -39,3 +39,11 @@ id = "plan-picker"
 title = "Speak: pick a plan"
 placement = "overlay"
 command = ["sh", "-c", "exec python3 \"$HERDR_PLUGIN_ROOT/speak.py\" pick"]
+
+# Opened by the picker to the right of the pane the key was pressed in, showing
+# the chosen plan read-only while it is spoken. Quit nvim to close it.
+[[panes]]
+id = "plan-view"
+title = "Speak: plan"
+placement = "split"
+command = ["sh", "-c", "exec nvim -R \"$SPEAK_PLAN\""]

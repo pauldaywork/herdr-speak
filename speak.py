@@ -688,8 +688,26 @@ def pick():
     choice = result.stdout.strip()
     if result.returncode != 0 or not choice:
         return
+    path = choice.split("\t", 1)[0]
     stop()
-    start_worker(["--plan", choice.split("\t", 1)[0]])
+    start_worker(["--plan", path])
+    open_viewer(path)
+
+
+def open_viewer(path):
+    """Open the plan read-only in a pane to the right of the one the key was pressed in."""
+    herdr = os.environ.get("HERDR_BIN_PATH") or "herdr"
+    command = [
+        herdr, "plugin", "pane", "open",
+        "--plugin", os.environ.get("HERDR_PLUGIN_ID") or "speak",
+        "--entrypoint", "plan-view", "--placement", "split", "--direction", "right",
+        "--cwd", str(Path(path).parent), "--env", f"SPEAK_PLAN={path}", "--no-focus",
+    ]
+    if os.environ.get("SPEAK_TARGET_PANE"):
+        command += ["--target-pane", os.environ["SPEAK_TARGET_PANE"]]
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        notify("Speak: couldn't open the plan beside you", result.stderr.strip()[-300:])
 
 
 def open_picker():
@@ -702,15 +720,16 @@ def open_picker():
         context = {}
     cwd = context.get("focused_pane_cwd") or str(Path.home())
     herdr = os.environ.get("HERDR_BIN_PATH") or "herdr"
-    result = subprocess.run(
-        [
-            herdr, "plugin", "pane", "open",
-            "--plugin", os.environ.get("HERDR_PLUGIN_ID") or "speak",
-            "--entrypoint", "plan-picker", "--placement", "overlay",
-            "--cwd", cwd, "--focus",
-        ],
-        capture_output=True, text=True, check=False,
-    )
+    command = [
+        herdr, "plugin", "pane", "open",
+        "--plugin", os.environ.get("HERDR_PLUGIN_ID") or "speak",
+        "--entrypoint", "plan-picker", "--placement", "overlay",
+        "--cwd", cwd, "--focus",
+    ]
+    # The picker runs in its own pane, so tell it which pane to open the plan beside.
+    if os.environ.get("HERDR_PANE_ID"):
+        command += ["--env", f"SPEAK_TARGET_PANE={os.environ['HERDR_PANE_ID']}"]
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
     if result.returncode != 0:
         notify("Speak: couldn't open the plan picker", result.stderr.strip()[-300:])
 

@@ -8,20 +8,20 @@ It finds the answer from the session herdr records for the pane. While the agent
 
 The plugin rewrites the answer for listening with `claude -p` on Haiku, using the rules in `prompt.md`. It streams the rewrite sentence by sentence to Kokoro and plays the raw audio through `ffplay`, so speech starts within about two seconds. Extended thinking is turned off for the rewrite, because it can delay the first words by a minute. If the rewrite fails, the plugin reads the answer with the markdown and code removed. The `speak.last-verbatim` action always reads it that way.
 
-`speak.plan` opens an fzf picker over the focused pane. It lists the markdown files under the pane's working directory and in `~/.claude/plans`, newest first, with a preview. The chosen file is rewritten with `prompt-plan.md`, which keeps every step and decision in order rather than shortening the plan. The picker skips hidden and dependency folders (such as `node_modules`) and looks at most six levels deep. The spoken text and audio are saved as `spoken/<project>/<name>.md` and `.opus` in the plugin state directory. That is outside every project and outside `~/.claude`, so an agent never mistakes them for a new plan. The project is the repository name, the same for every worktree of that repository, or the folder name for a file outside git (so files in `~/.claude/plans` land in `spoken/plans/`). The name is the file's path within the repository, with `--` between folders, so `docs/README.md` is saved as `docs--README` and doesn't collide with `README.md`. Playing a plan again replays the saved audio, as long as the file hasn't changed since, with no rewrite or TTS. If you stop playback early, nothing is saved.
+`speak.plan` opens an fzf picker over the focused pane. It lists the markdown files under the pane's working directory and in `~/.claude/plans`, newest first, with a preview. The chosen file is rewritten with `prompt-plan.md`, which keeps every step and decision in order rather than shortening the plan. The plan also opens read-only in `nvim` in a pane to the right, so you can read along; focus stays where it was, and quitting `nvim` closes the pane. The picker skips hidden and dependency folders (such as `node_modules`) and looks at most six levels deep. The spoken text and audio are saved as `spoken/<project>/<name>.md` and `.opus` in the plugin state directory. That is outside every project and outside `~/.claude`, so an agent never mistakes them for a new plan. The project is the repository name, the same for every worktree of that repository, or the folder name for a file outside git (so files in `~/.claude/plans` land in `spoken/plans/`). The name is the file's path within the repository, with `--` between folders, so `docs/README.md` is saved as `docs--README` and doesn't collide with `README.md`. Playing a plan again replays the saved audio, as long as the file hasn't changed since, with no rewrite or TTS. If you stop playback early, nothing is saved.
 
 | Action | What it does |
 | --- | --- |
 | `speak.last` | Speak the last answer, rewritten for listening. Invoke again to stop. |
 | `speak.last-verbatim` | Speak the last answer as written, with markdown and code removed. |
-| `speak.plan` | Pick a markdown plan and speak it. Invoke again to stop. |
+| `speak.plan` | Pick a markdown plan, speak it, and open it read-only beside the pane. Invoke again to stop. |
 | `speak.stop` | Stop playback. |
 
 ## Requirements
 
 - herdr 0.7 or newer, with the Claude integration installed (`herdr integration install claude`).
 - A Kokoro-FastAPI server, by default at `http://127.0.0.1:8880/v1`.
-- `python3`, `ffplay` and `ffmpeg` (with libopus) from FFmpeg, `fzf` for the plan picker, and the `claude` CLI signed in.
+- `python3`, `ffplay` and `ffmpeg` (with libopus) from FFmpeg, `fzf` for the plan picker, `nvim` to show the plan, and the `claude` CLI signed in.
 
 ## Start Kokoro on an NVIDIA GPU
 

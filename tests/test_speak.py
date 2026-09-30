@@ -387,6 +387,7 @@ class OpenPickerTest(unittest.TestCase):
             "HERDR_BIN_PATH": str(fake_command(self.tmp, "herdr", FAKE_HERDR)),
             "FAKE_ARGS": str(self.args),
             "HERDR_PLUGIN_ID": "speak",
+            "HERDR_PANE_ID": "pane-7",
             "HERDR_PLUGIN_CONTEXT_JSON": json.dumps({"focused_pane_cwd": "/work/proj"}),
         }
 
@@ -396,12 +397,46 @@ class OpenPickerTest(unittest.TestCase):
         self.assertEqual(self.args.read_text().split("\n")[:-1], [
             "plugin", "pane", "open", "--plugin", "speak", "--entrypoint", "plan-picker",
             "--placement", "overlay", "--cwd", "/work/proj", "--focus",
+            "--env", "SPEAK_TARGET_PANE=pane-7",
         ])
 
     def test_pressing_it_while_speaking_only_stops(self):
         with mock.patch.dict(os.environ, self.env), mock.patch.object(speak, "stop", return_value=True):
             speak.open_picker()
         self.assertFalse(self.args.exists())
+
+
+class OpenViewerTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.args = self.tmp / "args"
+        self.env = {
+            "HERDR_BIN_PATH": str(fake_command(self.tmp, "herdr", FAKE_HERDR)),
+            "FAKE_ARGS": str(self.args),
+            "HERDR_PLUGIN_ID": "speak",
+        }
+
+    def test_opens_the_plan_beside_the_pane_the_key_was_pressed_in(self):
+        with mock.patch.dict(os.environ, dict(self.env, SPEAK_TARGET_PANE="pane-7")):
+            speak.open_viewer("/work/proj/docs/plan.md")
+        self.assertEqual(self.args.read_text().split("\n")[:-1], [
+            "plugin", "pane", "open", "--plugin", "speak", "--entrypoint", "plan-view",
+            "--placement", "split", "--direction", "right", "--cwd", "/work/proj/docs",
+            "--env", "SPEAK_PLAN=/work/proj/docs/plan.md", "--no-focus", "--target-pane", "pane-7",
+        ])
+
+    def test_without_a_target_pane_herdr_picks_one(self):
+        with mock.patch.dict(os.environ, self.env):
+            os.environ.pop("SPEAK_TARGET_PANE", None)  # restored when the patch exits
+            speak.open_viewer("/work/plan.md")
+        self.assertNotIn("--target-pane", self.args.read_text().split("\n"))
+
+    def test_a_failure_is_reported(self):
+        failing = fake_command(self.tmp, "herdr-fails", "#!/bin/sh\necho 'no such pane' >&2\nexit 1\n")
+        with mock.patch.dict(os.environ, dict(self.env, HERDR_BIN_PATH=str(failing))), \
+                mock.patch.object(speak, "notify") as notify:
+            speak.open_viewer("/work/plan.md")
+        notify.assert_called_once_with("Speak: couldn't open the plan beside you", "no such pane")
 
 
 class PickTest(unittest.TestCase):
@@ -415,11 +450,13 @@ class PickTest(unittest.TestCase):
                 mock.patch.object(speak.Path, "cwd", return_value=tmp), \
                 mock.patch.object(speak.subprocess, "run", return_value=fzf) as run, \
                 mock.patch.object(speak, "stop"), \
-                mock.patch.object(speak, "start_worker") as start:
+                mock.patch.object(speak, "start_worker") as start, \
+                mock.patch.object(speak, "open_viewer") as viewer:
             speak.pick()
         self.assertEqual(run.call_args.args[0][0], "fzf")
         self.assertIn(str(tmp / "plan.md"), run.call_args.kwargs["input"])
         start.assert_called_once_with(["--plan", str(tmp / "plan.md")])
+        viewer.assert_called_once_with(str(tmp / "plan.md"))
 
     def test_a_missing_fzf_is_reported(self):
         tmp = Path(tempfile.mkdtemp()).resolve()
@@ -442,9 +479,11 @@ class PickTest(unittest.TestCase):
         with mock.patch.object(speak, "load_config", return_value=config), \
                 mock.patch.object(speak.Path, "cwd", return_value=tmp), \
                 mock.patch.object(speak.subprocess, "run", return_value=fzf), \
-                mock.patch.object(speak, "start_worker") as start:
+                mock.patch.object(speak, "start_worker") as start, \
+                mock.patch.object(speak, "open_viewer") as viewer:
             speak.pick()
         start.assert_not_called()
+        viewer.assert_not_called()
 
 
 if __name__ == "__main__":
