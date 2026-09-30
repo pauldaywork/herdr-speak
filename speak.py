@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Read the focused herdr pane's last agent answer aloud via a local Kokoro server.
+"""Read the focused herdr pane's last agent answer, or a chosen plan file, aloud via Kokoro.
 
 `speak.py toggle [--verbatim]` starts speaking, or stops speech already in
-progress. `speak.py stop` only stops. The work runs in a detached worker so the
-herdr action returns at once.
+progress. `speak.py stop` only stops. `speak.py plan` stops speech in progress,
+or opens a picker pane (`speak.py pick`) whose choice is spoken and saved for
+replay. The work runs in a detached worker so the herdr action returns at once.
 """
 
 import glob
@@ -572,6 +573,100 @@ def worker_plan(path):
     say(text, config, prompt=PLAN_PROMPT, timeout=config["planRewriteTimeout"], save_to=base)
 
 
+# --- Picking a plan ------------------------------------------------------------
+
+SKIP_DIRS = {"node_modules", "vendor", "target", "dist", "build", "venv", "__pycache__"}
+
+
+def plan_files(roots, exclude=None, max_depth=6):
+    """Markdown files under roots, newest first, skipping hidden and dependency folders."""
+    exclude = Path(exclude).resolve() if exclude else None
+    found = {}
+    for root in roots:
+        root = Path(root).expanduser().resolve()
+        if not root.is_dir():
+            continue
+        for folder, dirs, files in os.walk(root):
+            here = Path(folder)
+            if exclude and (here == exclude or exclude in here.parents):
+                dirs[:] = []
+                continue
+            if len(here.parts) - len(root.parts) >= max_depth - 1:
+                dirs[:] = []
+            else:
+                dirs[:] = [d for d in dirs if not d.startswith(".") and d not in SKIP_DIRS]
+            for name in files:
+                if name.lower().endswith(".md"):
+                    path = here / name
+                    try:
+                        found[path] = path.stat().st_mtime
+                    except OSError:
+                        continue
+    return sorted(found, key=found.get, reverse=True)
+
+
+def picker_lines(paths, cwd, home=None):
+    """fzf lines: the full path, a tab, then the date and a short name to show."""
+    cwd, home = Path(cwd).resolve(), Path(home or Path.home()).resolve()
+    lines = []
+    for path in paths:
+        if path.is_relative_to(cwd):
+            label = str(path.relative_to(cwd))
+        elif path.is_relative_to(home):
+            label = "~/" + str(path.relative_to(home))
+        else:
+            label = str(path)
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(path.stat().st_mtime))
+        lines.append(f"{path}\t{when}  {label}")
+    return lines
+
+
+def pick():
+    """Run in the picker pane: choose a plan with fzf, then speak it."""
+    config = load_config()
+    cwd = Path.cwd()
+    paths = plan_files([cwd, Path.home() / ".claude" / "plans"], exclude=spoken_dir(config))
+    if not paths:
+        notify("Speak: no plans found", f"No markdown files under {cwd} or ~/.claude/plans.")
+        return
+    result = subprocess.run(
+        [
+            "fzf", "--delimiter", "\t", "--with-nth", "2..", "--no-sort",
+            "--prompt", "plan> ", "--header", "Enter reads the plan aloud, Esc cancels",
+            "--preview", "head -n 200 {1}", "--preview-window", "right,60%,wrap",
+        ],
+        input="\n".join(picker_lines(paths, cwd)), stdout=subprocess.PIPE, text=True, check=False,
+    )
+    choice = result.stdout.strip()
+    if result.returncode != 0 or not choice:
+        return
+    stop()
+    start_worker(["--plan", choice.split("\t", 1)[0]])
+
+
+def open_picker():
+    """The speak.plan action: stop speech in progress, otherwise open the plan picker."""
+    if stop():
+        return
+    try:
+        context = json.loads(os.environ.get("HERDR_PLUGIN_CONTEXT_JSON") or "{}")
+    except ValueError:
+        context = {}
+    cwd = context.get("focused_pane_cwd") or str(Path.home())
+    herdr = os.environ.get("HERDR_BIN_PATH") or "herdr"
+    result = subprocess.run(
+        [
+            herdr, "plugin", "pane", "open",
+            "--plugin", os.environ.get("HERDR_PLUGIN_ID") or "speak",
+            "--entrypoint", "plan-picker", "--placement", "overlay",
+            "--cwd", cwd, "--focus",
+        ],
+        capture_output=True, text=True, check=False,
+    )
+    if result.returncode != 0:
+        notify("Speak: couldn't open the plan picker", result.stderr.strip()[-300:])
+
+
 # --- Process control -----------------------------------------------------------
 
 
@@ -626,8 +721,12 @@ def main(argv):
         finally:
             if running_worker() == os.getpid():
                 PID_FILE.unlink(missing_ok=True)
+    elif command == "plan":
+        open_picker()
+    elif command == "pick":
+        pick()
     else:
-        print(f"usage: {argv[0]} toggle [--verbatim] | stop", file=sys.stderr)
+        print(f"usage: {argv[0]} toggle [--verbatim] | stop | plan | pick", file=sys.stderr)
         return 2
     return 0
 

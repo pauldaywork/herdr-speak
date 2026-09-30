@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 import sys
@@ -216,6 +217,119 @@ class WorkerPlanTest(unittest.TestCase):
         replay = self.run_worker()
         replay.assert_not_called()
         self.assertEqual(len(self.prompts), 2)
+
+
+class PlanFilesTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp()).resolve()
+        self.stamp = time.time() - 1000
+
+    def touch(self, relative, age):
+        path = self.tmp / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("# x")
+        os.utime(path, (self.stamp - age, self.stamp - age))
+        return path
+
+    def test_markdown_files_newest_first_across_roots(self):
+        old = self.touch("proj/docs/old.md", 300)
+        new = self.touch("proj/new.MD", 100)
+        plan = self.touch("plans/mid.md", 200)
+        self.touch("proj/notes.txt", 0)
+        found = speak.plan_files([self.tmp / "proj", self.tmp / "plans", self.tmp / "missing"])
+        self.assertEqual(found, [new, plan, old])
+
+    def test_hidden_dependency_and_spoken_folders_are_skipped(self):
+        keep = self.touch("proj/keep.md", 0)
+        self.touch("proj/.git/x.md", 0)
+        self.touch("proj/node_modules/pkg/README.md", 0)
+        self.touch("proj/spoken/proj/plan.md", 0)
+        found = speak.plan_files([self.tmp / "proj"], exclude=self.tmp / "proj" / "spoken")
+        self.assertEqual(found, [keep])
+
+    def test_a_file_reached_twice_is_listed_once(self):
+        only = self.touch("proj/plan.md", 0)
+        self.assertEqual(speak.plan_files([self.tmp / "proj", self.tmp / "proj"]), [only])
+
+    def test_depth_is_limited(self):
+        shallow = self.touch("proj/a/b.md", 0)
+        self.touch("proj/a/b/c/d.md", 0)
+        self.assertEqual(speak.plan_files([self.tmp / "proj"], max_depth=2), [shallow])
+
+
+class PickerLinesTest(unittest.TestCase):
+    def test_labels_are_relative_to_cwd_then_home(self):
+        tmp = Path(tempfile.mkdtemp()).resolve()
+        home, cwd = tmp / "home", tmp / "home" / "proj"
+        paths = [cwd / "docs" / "a.md", home / ".claude" / "plans" / "b.md", tmp / "c.md"]
+        for path in paths:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("# x")
+        lines = speak.picker_lines(paths, cwd, home)
+        self.assertEqual([line.split("\t")[0] for line in lines], [str(p) for p in paths])
+        labels = [line.split("\t")[1].split("  ", 1)[1] for line in lines]
+        self.assertEqual(labels, ["docs/a.md", "~/.claude/plans/b.md", str(tmp / "c.md")])
+        self.assertRegex(lines[0].split("\t")[1], r"^\d{4}-\d\d-\d\d \d\d:\d\d  ")
+
+
+FAKE_HERDR = """#!/bin/sh
+printf '%s\\n' "$@" > "$FAKE_ARGS"
+"""
+
+
+class OpenPickerTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.args = self.tmp / "args"
+        self.env = {
+            "HERDR_BIN_PATH": str(fake_command(self.tmp, "herdr", FAKE_HERDR)),
+            "FAKE_ARGS": str(self.args),
+            "HERDR_PLUGIN_ID": "speak",
+            "HERDR_PLUGIN_CONTEXT_JSON": json.dumps({"focused_pane_cwd": "/work/proj"}),
+        }
+
+    def test_opens_the_overlay_picker_in_the_focused_pane_cwd(self):
+        with mock.patch.dict(os.environ, self.env), mock.patch.object(speak, "stop", return_value=False):
+            speak.open_picker()
+        self.assertEqual(self.args.read_text().split("\n")[:-1], [
+            "plugin", "pane", "open", "--plugin", "speak", "--entrypoint", "plan-picker",
+            "--placement", "overlay", "--cwd", "/work/proj", "--focus",
+        ])
+
+    def test_pressing_it_while_speaking_only_stops(self):
+        with mock.patch.dict(os.environ, self.env), mock.patch.object(speak, "stop", return_value=True):
+            speak.open_picker()
+        self.assertFalse(self.args.exists())
+
+
+class PickTest(unittest.TestCase):
+    def test_the_chosen_plan_is_handed_to_a_new_worker(self):
+        tmp = Path(tempfile.mkdtemp()).resolve()
+        (tmp / "plan.md").write_text("# Plan")
+        chosen = f"{tmp / 'plan.md'}\t2026-09-30 10:00  plan.md\n"
+        config = dict(speak.DEFAULTS, spokenDir=str(tmp / "spoken"))
+        fzf = subprocess.CompletedProcess([], 0, stdout=chosen)
+        with mock.patch.object(speak, "load_config", return_value=config), \
+                mock.patch.object(speak.Path, "cwd", return_value=tmp), \
+                mock.patch.object(speak.subprocess, "run", return_value=fzf) as run, \
+                mock.patch.object(speak, "stop"), \
+                mock.patch.object(speak, "start_worker") as start:
+            speak.pick()
+        self.assertEqual(run.call_args.args[0][0], "fzf")
+        self.assertIn(str(tmp / "plan.md"), run.call_args.kwargs["input"])
+        start.assert_called_once_with(["--plan", str(tmp / "plan.md")])
+
+    def test_escape_starts_nothing(self):
+        tmp = Path(tempfile.mkdtemp()).resolve()
+        (tmp / "plan.md").write_text("# Plan")
+        config = dict(speak.DEFAULTS, spokenDir=str(tmp / "spoken"))
+        fzf = subprocess.CompletedProcess([], 130, stdout="")
+        with mock.patch.object(speak, "load_config", return_value=config), \
+                mock.patch.object(speak.Path, "cwd", return_value=tmp), \
+                mock.patch.object(speak.subprocess, "run", return_value=fzf), \
+                mock.patch.object(speak, "start_worker") as start:
+            speak.pick()
+        start.assert_not_called()
 
 
 if __name__ == "__main__":
