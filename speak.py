@@ -371,7 +371,8 @@ def synthesize_captioned(text, config):
     The PCM is 24 kHz mono s16le like synthesize(); each timing is a dict with
     word, start_time and end_time in seconds into that PCM.
     """
-    parts = urllib.parse.urlsplit(config["baseUrl"])
+    root = config["baseUrl"].rstrip("/")
+    root = root.removesuffix("/v1")
     body = json.dumps({
         "model": config["model"],
         "voice": config["voice"],
@@ -382,7 +383,7 @@ def synthesize_captioned(text, config):
         "return_timestamps": True,
     }).encode()
     request = urllib.request.Request(
-        f"{parts.scheme}://{parts.netloc}/dev/captioned_speech",
+        root + "/dev/captioned_speech",
         data=body, headers={"Content-Type": "application/json"},
     )
     with urllib.request.urlopen(request, timeout=60) as response:
@@ -497,8 +498,13 @@ class Recording:
             self.raw.write_text(self.source)
         self.text.write_text("\n\n".join(self.parts) + "\n")
         self.lyrics.write_text(lrc_text(self.captions))
-        self.partial.replace(self.audio)
-        self.finished = True
+        # A SIGTERM between the rename and the flag would make abort() keep only the audio.
+        signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
+        try:
+            self.partial.replace(self.audio)
+            self.finished = True
+        finally:
+            signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})
 
     def abort(self):
         if self.encoder:
@@ -664,7 +670,13 @@ def render(text, config, base, prompt=PLAN_PROMPT, timeout=None, keep_source=Fal
     recording.start()
     try:
         for sentence in sentences(rewrite_stream(text, config, prompt, timeout)):
-            audio, words = synthesize_captioned(sentence, config)
+            try:
+                audio, words = synthesize_captioned(sentence, config)
+            except urllib.error.HTTPError as error:
+                if error.code not in (404, 405):
+                    raise
+                # No captioned endpoint on this server: one caption line per chunk.
+                audio, words = b"".join(synthesize(sentence, config)), ()
             recording.add_text(sentence, words)
             recording.write(audio)
         if not recording.parts:
@@ -874,7 +886,7 @@ def save_panes(panes):
 
 
 def live_pane(panes, role):
-    """The recorded pane for role ("plan" or "player"), if it is still open."""
+    """The recorded pane for role ("plan", "captions" or "player"), if it is still open."""
     entry = panes.get(role)
     if entry and herdr("pane", "get", entry["pane"]).returncode == 0:
         return entry
@@ -986,10 +998,11 @@ def show_selection(base):
                              {"SPEAK_LYRICS": str(spoken_file(base, ".lrc"))})
         if captions:
             panes["captions"] = {"pane": captions, "plan": text}
-            player = open_pane("plan-player", "down", captions, base.parent,
-                               {"SPEAK_AUDIO": str(spoken_file(base, ".opus"))})
-            if player:
-                panes["player"] = {"pane": player, "plan": text}
+        # Without captions the player goes under the text: the audio is the point.
+        player = open_pane("plan-player", "down", captions or view, base.parent,
+                           {"SPEAK_AUDIO": str(spoken_file(base, ".opus"))})
+        if player:
+            panes["player"] = {"pane": player, "plan": text}
     save_panes(panes)
 
 

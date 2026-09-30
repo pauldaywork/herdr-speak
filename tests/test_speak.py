@@ -10,6 +10,7 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest import mock
 
@@ -362,6 +363,15 @@ class RenderTest(unittest.TestCase):
         self.assertGreater(speak.spoken_file(self.base, ".opus").stat().st_size, 0)
         self.assertFalse(speak.spoken_file(self.base, ".txt").exists())
 
+    def test_a_server_without_captions_falls_back_to_one_line_per_chunk(self):
+        def missing(text, config):
+            raise urllib.error.HTTPError("http://x/dev/captioned_speech", 404, "Not Found", {}, None)
+
+        with mock.patch.object(speak, "synthesize", fake_synthesize):
+            self.render(lambda text, config, prompt, timeout: iter(["First step. Second step."]), captioned=missing)
+        self.assertGreater(speak.spoken_file(self.base, ".opus").stat().st_size, 0)
+        self.assertEqual(speak.spoken_file(self.base, ".lrc").read_text().count("\n"), 1)
+
     def test_a_failed_rewrite_raises_and_saves_nothing(self):
         def broken(text, config, prompt, timeout):
             yield "First step. "
@@ -541,6 +551,12 @@ class SynthesizeCaptionedTest(unittest.TestCase):
         self.assertEqual(path, "/dev/captioned_speech")
         self.assertEqual(body, {"model": "kokoro", "voice": "af_bella", "input": "Hi.", "speed": 1.0,
                                 "response_format": "pcm", "stream": False, "return_timestamps": True})
+
+    def test_a_base_url_with_a_path_prefix_keeps_it(self):
+        self.reply = json.dumps({"audio": "AAAA", "timestamps": []}).encode()
+        port = self.server.server_address[1]
+        speak.synthesize_captioned("Hi.", dict(self.config, baseUrl=f"http://127.0.0.1:{port}/kokoro/v1/"))
+        self.assertEqual([path for path, body in self.requests], ["/kokoro/dev/captioned_speech"])
 
     def test_a_reply_without_audio_raises(self):
         self.reply = b'{"detail": "nope"}'
@@ -888,6 +904,19 @@ class PanesTest(unittest.TestCase):
         speak.show_plan("/work/a.md")
         self.assertEqual(sorted(self.calls("pane close")), ["pane close p1", "pane close p2", "pane close p3"])
         self.assertIn("SPEAK_PLAN=/work/a.md", self.calls("plugin")[-1])
+
+    def test_a_selection_whose_captions_pane_fails_puts_the_player_under_the_text(self):
+        script = FAKE_HERDR_PANES.replace(
+            '"plugin pane")\n', '"plugin pane")\n        case "$*" in *"--entrypoint captions"*) echo boom >&2; exit 1 ;; esac\n')
+        flaky = fake_command(self.tmp, "herdr-flaky", script)
+        with mock.patch.dict(os.environ, {"HERDR_BIN_PATH": str(flaky)}), mock.patch.object(speak, "notify"):
+            speak.show_selection(Path("/s/proj/selection-1"))
+        self.assertTrue(self.calls("plugin")[-1].endswith("--target-pane p1"))
+        self.assertIn("--entrypoint plan-player", self.calls("plugin")[-1])
+        entry = {"plan": "/s/proj/selection-1.md"}
+        self.assertEqual(json.loads(speak.PANES_FILE.read_text()), {
+            "plan": dict(entry, pane="p1"), "player": dict(entry, pane="p2"),
+        })
 
     def test_a_selection_whose_text_pane_fails_opens_nothing_else(self):
         failing = fake_command(self.tmp, "herdr-fails", "#!/bin/sh\necho 'no such pane' >&2\nexit 1\n")
