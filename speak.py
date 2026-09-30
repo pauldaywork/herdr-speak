@@ -357,11 +357,72 @@ def synthesize(text, config):
             yield chunk
 
 
-def play(chunks, config):
+AUDIO_FORMAT = ["-f", "s16le", "-ar", "24000", "-ch_layout", "mono"]
+
+
+def spoken_file(base, suffix):
+    """base with suffix appended, keeping any dots already in its name."""
+    return base.with_name(base.name + suffix)
+
+
+class Recording:
+    """Saves what play() speaks as <base>.md and <base>.opus.
+
+    Audio is encoded to <base>.opus.part as it plays, and both files appear
+    only when playback finishes, so a stopped run never leaves a partial file
+    that a later replay would trust.
+    """
+
+    def __init__(self, base):
+        self.base = Path(base)
+        self.audio = spoken_file(self.base, ".opus")
+        self.text = spoken_file(self.base, ".md")
+        self.partial = spoken_file(self.base, ".opus.part")
+        self.parts = []
+        self.encoder = None
+        self.finished = False
+
+    def start(self):
+        self.base.parent.mkdir(parents=True, exist_ok=True)
+        self.encoder = subprocess.Popen(
+            [
+                "ffmpeg", "-y", "-loglevel", "error", *AUDIO_FORMAT, "-i", "-",
+                "-c:a", "libopus", "-b:a", "48k", "-f", "ogg", str(self.partial),
+            ],
+            stdin=subprocess.PIPE,
+        )
+
+    def add_text(self, text):
+        self.parts.append(text)
+
+    def write(self, audio):
+        self.encoder.stdin.write(audio)
+
+    def finish(self):
+        self.encoder.stdin.close()
+        if self.encoder.wait() != 0:
+            raise RuntimeError(f"ffmpeg exited {self.encoder.returncode} saving {self.audio}")
+        # Text first: replay trusts the audio, so it must be the last file to appear.
+        self.text.write_text("\n\n".join(self.parts) + "\n")
+        self.partial.replace(self.audio)
+        self.finished = True
+
+    def abort(self):
+        if self.encoder:
+            if self.encoder.stdin and not self.encoder.stdin.closed:
+                self.encoder.stdin.close()
+            if self.encoder.poll() is None:
+                self.encoder.kill()
+                self.encoder.wait()
+        self.partial.unlink(missing_ok=True)
+
+
+def play(chunks, config, recording=None):
     """Speak each text chunk in order through one player process.
 
     Chunks are pulled on a separate thread so the rewrite keeps streaming while
-    earlier sentences play.
+    earlier sentences play. With a recording, the text and audio are saved when
+    every chunk has played.
     """
     pending = queue.Queue()
 
@@ -375,27 +436,38 @@ def play(chunks, config):
 
     threading.Thread(target=produce, daemon=True).start()
     player = subprocess.Popen(config["player"], stdin=subprocess.PIPE)
-    spoke = False
+    spoke = complete = False
     try:
+        if recording:
+            recording.start()
         while True:
             kind, item = pending.get()
             if kind == "done":
+                complete = True
                 break
             if kind == "error":
                 if not spoke:
                     raise item
                 print(f"stopped partway: {item!r}", file=sys.stderr)
                 break
+            if recording:
+                recording.add_text(item)
             for audio in synthesize(item, config):
                 player.stdin.write(audio)
+                if recording:
+                    recording.write(audio)
             spoke = True
         player.stdin.close()
         player.wait()
+        if recording and complete and spoke:
+            recording.finish()
     except BrokenPipeError:
         pass
     finally:
         if player.poll() is None and not spoke:
             player.terminate()
+        if recording and not recording.finished:
+            recording.abort()
     return spoke
 
 

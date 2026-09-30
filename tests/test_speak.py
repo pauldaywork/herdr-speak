@@ -52,5 +52,41 @@ class RewriteStreamTest(unittest.TestCase):
         self.assertEqual(speak.DEFAULTS["planRewriteTimeout"], 300)
 
 
+def fake_synthesize(text, config):
+    yield b"\0" * 4800  # 0.1 s of silence
+
+
+class RecordingTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.base = self.tmp / "proj" / "v1.2-plan"
+        self.config = dict(speak.DEFAULTS, player=["sh", "-c", "cat > /dev/null"])
+
+    def play(self, chunks, recording=None):
+        with mock.patch.object(speak, "synthesize", fake_synthesize):
+            return speak.play(chunks, self.config, recording)
+
+    def test_spoken_file_keeps_dots_in_the_name(self):
+        self.assertEqual(speak.spoken_file(self.base, ".opus").name, "v1.2-plan.opus")
+
+    def test_complete_playback_saves_text_and_audio(self):
+        self.assertTrue(self.play(["First sentence.", "Second sentence."], speak.Recording(self.base)))
+        folder = self.base.parent
+        self.assertEqual((folder / "v1.2-plan.md").read_text(), "First sentence.\n\nSecond sentence.\n")
+        self.assertGreater((folder / "v1.2-plan.opus").stat().st_size, 0)
+        self.assertFalse((folder / "v1.2-plan.opus.part").exists())
+
+    def test_playback_that_stops_partway_saves_nothing(self):
+        def chunks():
+            yield "First sentence."
+            raise RuntimeError("rewrite died")
+
+        self.assertTrue(self.play(chunks(), speak.Recording(self.base)))
+        self.assertEqual(list(self.base.parent.iterdir()), [])
+
+    def test_play_without_a_recording_still_works(self):
+        self.assertTrue(self.play(["Just speak."]))
+
+
 if __name__ == "__main__":
     unittest.main()
