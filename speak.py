@@ -483,7 +483,7 @@ def saved_audio(source, base):
 
 
 def play_file(audio, config):
-    """Replay saved audio through the configured PCM player."""
+    """Replay saved audio through the configured PCM player; raise RuntimeError if either exits badly."""
     decoder = subprocess.Popen(
         ["ffmpeg", "-loglevel", "error", "-i", str(audio), *AUDIO_FORMAT, "-"],
         stdout=subprocess.PIPE,
@@ -492,6 +492,8 @@ def play_file(audio, config):
     decoder.stdout.close()
     player.wait()
     decoder.wait()
+    if decoder.returncode != 0 or player.returncode != 0:
+        raise RuntimeError(f"ffmpeg exited {decoder.returncode}, player exited {player.returncode}")
 
 
 def play(chunks, config, recording=None):
@@ -598,8 +600,12 @@ def worker_plan(path):
     base = spoken_base(source, config)
     audio = saved_audio(source, base)
     if audio:
-        play_file(audio, config)
-        return
+        try:
+            play_file(audio, config)
+            return
+        except (OSError, RuntimeError) as error:
+            # Speak it afresh below, which replaces a corrupt saved file.
+            notify("Speak: couldn't replay the saved audio", str(error))
     try:
         text = source.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as error:
@@ -651,7 +657,10 @@ def picker_lines(paths, cwd, home=None):
             label = "~/" + str(path.relative_to(home))
         else:
             label = str(path)
-        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(path.stat().st_mtime))
+        try:
+            when = time.strftime("%Y-%m-%d %H:%M", time.localtime(path.stat().st_mtime))
+        except OSError:
+            continue  # deleted since the walk
         lines.append(f"{path}\t{when}  {label}")
     return lines
 
@@ -664,14 +673,18 @@ def pick():
     if not paths:
         notify("Speak: no plans found", f"No markdown files under {cwd} or ~/.claude/plans.")
         return
-    result = subprocess.run(
-        [
-            "fzf", "--delimiter", "\t", "--with-nth", "2..", "--no-sort",
-            "--prompt", "plan> ", "--header", "Enter reads the plan aloud, Esc cancels",
-            "--preview", "head -n 200 {1}", "--preview-window", "right,60%,wrap",
-        ],
-        input="\n".join(picker_lines(paths, cwd)), stdout=subprocess.PIPE, text=True, check=False,
-    )
+    try:
+        result = subprocess.run(
+            [
+                "fzf", "--delimiter", "\t", "--with-nth", "2..", "--no-sort",
+                "--prompt", "plan> ", "--header", "Enter reads the plan aloud, Esc cancels",
+                "--preview", "head -n 200 {1}", "--preview-window", "right,60%,wrap",
+            ],
+            input="\n".join(picker_lines(paths, cwd)), stdout=subprocess.PIPE, text=True, check=False,
+        )
+    except OSError:
+        notify("Speak: fzf not found", "Install fzf to pick a plan.")
+        return
     choice = result.stdout.strip()
     if result.returncode != 0 or not choice:
         return

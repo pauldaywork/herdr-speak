@@ -294,6 +294,27 @@ class WorkerPlanTest(unittest.TestCase):
         self.assertFalse((self.tmp / "spoken").exists() and any((self.tmp / "spoken").rglob("*.*")))
 
 
+    def test_a_corrupt_saved_audio_is_reported_and_replaced(self):
+        self.run_worker()
+        saved = self.tmp / "spoken" / "proj" / "plan.opus"
+        saved.write_bytes(b"not audio")
+        with mock.patch.multiple(
+            speak,
+            load_config=lambda: self.config,
+            ensure_kokoro=lambda config: None,
+            synthesize=fake_synthesize,
+            rewrite_stream=self.fake_rewrite,
+            notify=mock.DEFAULT,
+        ) as patched, contextlib.redirect_stderr(io.StringIO()):
+            speak.worker_plan(str(self.source))
+        patched["notify"].assert_called_once()
+        self.assertEqual(patched["notify"].call_args.args[0], "Speak: couldn't replay the saved audio")
+        self.assertEqual(len(self.prompts), 2)
+        replayed = self.tmp / "played.pcm"
+        speak.play_file(saved, dict(self.config, player=["sh", "-c", f"cat > '{replayed}'"]))
+        self.assertGreater(replayed.stat().st_size, 0)
+
+
 class PlanFilesTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp()).resolve()
@@ -333,6 +354,12 @@ class PlanFilesTest(unittest.TestCase):
 
 
 class PickerLinesTest(unittest.TestCase):
+    def test_a_file_deleted_after_the_walk_is_skipped(self):
+        tmp = Path(tempfile.mkdtemp()).resolve()
+        (tmp / "here.md").write_text("# x")
+        lines = speak.picker_lines([tmp / "gone.md", tmp / "here.md"], tmp, tmp)
+        self.assertEqual([line.split("\t")[0] for line in lines], [str(tmp / "here.md")])
+
     def test_labels_are_relative_to_cwd_then_home(self):
         tmp = Path(tempfile.mkdtemp()).resolve()
         home, cwd = tmp / "home", tmp / "home" / "proj"
@@ -393,6 +420,19 @@ class PickTest(unittest.TestCase):
         self.assertEqual(run.call_args.args[0][0], "fzf")
         self.assertIn(str(tmp / "plan.md"), run.call_args.kwargs["input"])
         start.assert_called_once_with(["--plan", str(tmp / "plan.md")])
+
+    def test_a_missing_fzf_is_reported(self):
+        tmp = Path(tempfile.mkdtemp()).resolve()
+        (tmp / "plan.md").write_text("# Plan")
+        config = dict(speak.DEFAULTS, spokenDir=str(tmp / "spoken"))
+        with mock.patch.object(speak, "load_config", return_value=config), \
+                mock.patch.object(speak.Path, "cwd", return_value=tmp), \
+                mock.patch.object(speak.subprocess, "run", side_effect=FileNotFoundError("fzf")), \
+                mock.patch.object(speak, "notify") as notify, \
+                mock.patch.object(speak, "start_worker") as start:
+            speak.pick()
+        notify.assert_called_once_with("Speak: fzf not found", "Install fzf to pick a plan.")
+        start.assert_not_called()
 
     def test_escape_starts_nothing(self):
         tmp = Path(tempfile.mkdtemp()).resolve()
