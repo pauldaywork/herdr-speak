@@ -419,6 +419,36 @@ class RenderTest(unittest.TestCase):
             self.render(lambda text, config, prompt, timeout: iter(["Spoken."]), keep_source=True)
         self.assertEqual(seen, {"plan.txt", "plan.md", "plan.lrc", "plan.opus.part"})
 
+    def test_sigterm_mid_render_leaves_no_partial_files(self):
+        child = (
+            "import sys, time\n"
+            f"sys.path.insert(0, {str(ROOT)!r})\n"
+            "from pathlib import Path\n"
+            "import speak\n"
+            "def rewrite(text, config, prompt, timeout):\n"
+            "    yield 'First step of the plan. Then more.'\n"
+            "    time.sleep(60)\n"
+            "speak.rewrite_stream = rewrite\n"
+            "speak.synthesize_captioned = lambda text, config: (b'\\0' * 480000, [])\n"
+            "speak.exit_on_sigterm()\n"
+            "speak.render('# Plan', dict(speak.DEFAULTS), Path(sys.argv[1]), keep_source=True)\n"
+        )
+        env = dict(os.environ, HERDR_PLUGIN_STATE_DIR=tempfile.mkdtemp())
+        process = subprocess.Popen([sys.executable, "-c", child, str(self.base)], env=env)
+        try:
+            deadline = time.monotonic() + 10
+            part = speak.spoken_file(self.base, ".opus.part")
+            while not part.exists():
+                self.assertLess(time.monotonic(), deadline, "the render never started saving")
+                time.sleep(0.05)
+            process.terminate()
+            self.assertEqual(process.wait(timeout=10), 143)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+        self.assertEqual(list(self.base.parent.iterdir()), [])
+
     def test_a_failed_rewrite_keeping_the_source_saves_nothing(self):
         def broken(text, config, prompt, timeout):
             yield "First step. "

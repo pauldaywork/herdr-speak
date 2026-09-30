@@ -1089,6 +1089,14 @@ def start_worker(args):
     PID_FILE.write_text(str(process.pid))
 
 
+def exit_on_sigterm():
+    """Turn SIGTERM into a normal exit, so finally blocks run and a killed render leaves no partial files."""
+    def handler(signum, frame):
+        sys.exit(128 + signum)
+
+    signal.signal(signal.SIGTERM, handler)
+
+
 def main(argv):
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     command = argv[1] if len(argv) > 1 else "toggle"
@@ -1101,6 +1109,7 @@ def main(argv):
             return
         start_worker(["--verbatim"] if verbatim else [])
     elif command == "worker":
+        exit_on_sigterm()
         try:
             if "--plan" in argv:
                 worker_plan(argv[argv.index("--plan") + 1])
