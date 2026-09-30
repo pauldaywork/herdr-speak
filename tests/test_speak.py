@@ -14,6 +14,11 @@ ROOT = Path(__file__).resolve().parent.parent
 # speak.py reads these at import time; keep tests away from real plugin state.
 os.environ["HERDR_PLUGIN_STATE_DIR"] = tempfile.mkdtemp()
 os.environ["HERDR_PLUGIN_CONFIG_DIR"] = tempfile.mkdtemp()
+# Never reach the real herdr (panes, notifications) from a test; tests that need it fake it.
+_no_herdr = Path(tempfile.mkdtemp()) / "herdr"
+_no_herdr.write_text("#!/bin/sh\nexit 1\n")
+_no_herdr.chmod(0o755)
+os.environ["HERDR_BIN_PATH"] = str(_no_herdr)
 sys.path.insert(0, str(ROOT))
 
 import speak  # noqa: E402
@@ -243,7 +248,8 @@ class WorkerPlanTest(unittest.TestCase):
             ensure_kokoro=lambda config: None,
             synthesize=fake_synthesize,
             rewrite_stream=self.fake_rewrite,
-        ), mock.patch.object(speak, "play_file") as replay:
+        ), mock.patch.object(speak, "play_file") as replay, \
+                mock.patch.object(speak, "open_player") as self.player:
             speak.worker_plan(str(self.source))
         return replay
 
@@ -256,11 +262,18 @@ class WorkerPlanTest(unittest.TestCase):
         self.assertTrue((folder / "plan.opus").exists())
         self.assertEqual(sorted(p.name for p in (self.tmp / "proj").iterdir()), ["plan.md"])
 
+    def test_first_play_opens_the_player_paused_once_the_audio_is_saved(self):
+        self.run_worker()
+        self.player.assert_called_once_with(
+            str(self.source.resolve()), self.tmp / "spoken" / "proj" / "plan.opus", paused=True,
+        )
+
     def test_second_play_of_an_unchanged_file_replays_the_saved_audio(self):
         self.run_worker()
         replay = self.run_worker()
         replay.assert_called_once_with(self.tmp / "spoken" / "proj" / "plan.opus", self.config)
         self.assertEqual(len(self.prompts), 1)
+        self.player.assert_not_called()
 
     def test_an_edited_file_is_rewritten_again(self):
         self.run_worker()
@@ -288,8 +301,11 @@ class WorkerPlanTest(unittest.TestCase):
             ensure_kokoro=lambda config: None,
             synthesize=record,
             rewrite_stream=broken,
-        ), mock.patch.object(speak, "play_file"), contextlib.redirect_stderr(io.StringIO()):
+        ), mock.patch.object(speak, "play_file"), \
+                mock.patch.object(speak, "open_player") as player, \
+                contextlib.redirect_stderr(io.StringIO()):
             speak.worker_plan(str(self.source))
+        player.assert_not_called()
         self.assertEqual(spoken, [speak.strip_markdown(self.source.read_text())])
         self.assertFalse((self.tmp / "spoken").exists() and any((self.tmp / "spoken").rglob("*.*")))
 
@@ -305,8 +321,10 @@ class WorkerPlanTest(unittest.TestCase):
             synthesize=fake_synthesize,
             rewrite_stream=self.fake_rewrite,
             notify=mock.DEFAULT,
+            open_player=mock.DEFAULT,
         ) as patched, contextlib.redirect_stderr(io.StringIO()):
             speak.worker_plan(str(self.source))
+        patched["open_player"].assert_called_once_with(str(self.source.resolve()), saved, paused=True)
         patched["notify"].assert_called_once()
         self.assertEqual(patched["notify"].call_args.args[0], "Speak: couldn't replay the saved audio")
         self.assertEqual(len(self.prompts), 2)
@@ -406,64 +424,165 @@ class OpenPickerTest(unittest.TestCase):
         self.assertFalse(self.args.exists())
 
 
-class OpenViewerTest(unittest.TestCase):
+FAKE_HERDR_PANES = """#!/bin/sh
+# Logs each call and keeps a list of live panes, like enough of herdr for these tests.
+echo "$*" >> "$FAKE_LOG"
+case "$1 $2" in
+    "pane get") grep -qx "$3" "$FAKE_LIVE" ;;
+    "pane close") grep -vx "$3" "$FAKE_LIVE" > "$FAKE_LIVE.new"; mv "$FAKE_LIVE.new" "$FAKE_LIVE" ;;
+    "plugin pane")
+        n=$(( $(wc -l < "$FAKE_LIVE") + $(grep -c close "$FAKE_LOG") + 1 ))
+        echo "p$n" >> "$FAKE_LIVE"
+        printf '{"result":{"plugin_pane":{"pane":{"pane_id":"p%s"}}}}\\n' "$n" ;;
+esac
+"""
+
+
+class PanesTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
-        self.args = self.tmp / "args"
+        self.log = self.tmp / "log"
+        self.live = self.tmp / "live"
+        self.live.write_text("")
         self.env = {
-            "HERDR_BIN_PATH": str(fake_command(self.tmp, "herdr", FAKE_HERDR)),
-            "FAKE_ARGS": str(self.args),
+            "HERDR_BIN_PATH": str(fake_command(self.tmp, "herdr", FAKE_HERDR_PANES)),
+            "FAKE_LOG": str(self.log),
+            "FAKE_LIVE": str(self.live),
             "HERDR_PLUGIN_ID": "speak",
+            "SPEAK_TARGET_PANE": "w1",
         }
+        patches = [
+            mock.patch.dict(os.environ, self.env),
+            mock.patch.object(speak, "PANES_FILE", self.tmp / "panes.json"),
+        ]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
 
-    def test_opens_the_plan_beside_the_pane_the_key_was_pressed_in(self):
-        with mock.patch.dict(os.environ, dict(self.env, SPEAK_TARGET_PANE="pane-7")):
-            speak.open_viewer("/work/proj/docs/plan.md")
-        self.assertEqual(self.args.read_text().split("\n")[:-1], [
-            "plugin", "pane", "open", "--plugin", "speak", "--entrypoint", "plan-view",
-            "--placement", "split", "--direction", "right", "--cwd", "/work/proj/docs",
-            "--env", "SPEAK_PLAN=/work/proj/docs/plan.md", "--no-focus", "--target-pane", "pane-7",
+    def calls(self, prefix=""):
+        return [line for line in self.log.read_text().splitlines() if line.startswith(prefix)]
+
+    def test_a_plan_opens_read_only_beside_the_pane_the_key_was_pressed_in(self):
+        speak.show_plan("/work/proj/docs/plan.md")
+        self.assertEqual(self.calls("plugin"), [
+            "plugin pane open --plugin speak --entrypoint plan-view --placement split"
+            " --direction right --cwd /work/proj/docs --env SPEAK_PLAN=/work/proj/docs/plan.md"
+            " --no-focus --target-pane w1",
         ])
 
-    def test_without_a_target_pane_herdr_picks_one(self):
-        with mock.patch.dict(os.environ, self.env):
-            os.environ.pop("SPEAK_TARGET_PANE", None)  # restored when the patch exits
-            speak.open_viewer("/work/plan.md")
-        self.assertNotIn("--target-pane", self.args.read_text().split("\n"))
+    def test_the_same_plan_reuses_its_open_pane(self):
+        speak.show_plan("/work/plan.md")
+        speak.show_plan("/work/plan.md")
+        self.assertEqual(len(self.calls("plugin")), 1)
+
+    def test_a_plan_pane_you_closed_opens_again(self):
+        speak.show_plan("/work/plan.md")
+        self.live.write_text("")
+        speak.show_plan("/work/plan.md")
+        self.assertEqual(len(self.calls("plugin")), 2)
+
+    def test_the_player_opens_under_the_plan(self):
+        speak.show_plan("/work/plan.md")
+        speak.open_player("/work/plan.md", Path("/s/plan.opus"), paused=True)
+        self.assertEqual(self.calls("plugin")[-1],
+            "plugin pane open --plugin speak --entrypoint plan-player --placement split"
+            " --direction down --cwd /work --env SPEAK_AUDIO=/s/plan.opus --env SPEAK_PAUSE=1"
+            " --no-focus --target-pane p1")
+
+    def test_a_playing_player_has_no_pause_flag(self):
+        speak.show_plan("/work/plan.md")
+        speak.open_player("/work/plan.md", Path("/s/plan.opus"), paused=False)
+        self.assertNotIn("SPEAK_PAUSE", self.calls("plugin")[-1])
+
+    def test_a_new_player_replaces_the_old_one(self):
+        speak.show_plan("/work/plan.md")
+        speak.open_player("/work/plan.md", Path("/s/plan.opus"), paused=True)
+        speak.open_player("/work/plan.md", Path("/s/plan.opus"), paused=False)
+        self.assertEqual(self.calls("pane close"), ["pane close p2"])
+
+    def test_a_different_plan_replaces_the_plan_and_player_panes(self):
+        speak.show_plan("/work/a.md")
+        speak.open_player("/work/a.md", Path("/s/a.opus"), paused=True)
+        speak.show_plan("/work/b.md")
+        self.assertEqual(sorted(self.calls("pane close")), ["pane close p1", "pane close p2"])
+        self.assertIn("SPEAK_PLAN=/work/b.md", self.calls("plugin")[-1])
+
+    def test_without_a_plan_pane_the_player_opens_beside_the_key_pane(self):
+        speak.open_player("/work/plan.md", Path("/s/plan.opus"), paused=True)
+        self.assertIn("--direction right", self.calls("plugin")[-1])
+        self.assertTrue(self.calls("plugin")[-1].endswith("--target-pane w1"))
 
     def test_a_failure_is_reported(self):
         failing = fake_command(self.tmp, "herdr-fails", "#!/bin/sh\necho 'no such pane' >&2\nexit 1\n")
-        with mock.patch.dict(os.environ, dict(self.env, HERDR_BIN_PATH=str(failing))), \
+        with mock.patch.dict(os.environ, {"HERDR_BIN_PATH": str(failing)}), \
                 mock.patch.object(speak, "notify") as notify:
-            speak.open_viewer("/work/plan.md")
-        notify.assert_called_once_with("Speak: couldn't open the plan beside you", "no such pane")
+            speak.show_plan("/work/plan.md")
+        notify.assert_called_once_with("Speak: couldn't open a pane", "no such pane")
+
+
+class PlayerCommandTest(unittest.TestCase):
+    def test_mpv_stays_open_with_a_progress_bar(self):
+        command = speak.player_command("/s/plan.opus", paused=False)
+        self.assertEqual(command[0], "mpv")
+        self.assertEqual(command[-1], "/s/plan.opus")
+        for flag in ("--no-video", "--keep-open=yes", "--term-osd-bar"):
+            self.assertIn(flag, command)
+        self.assertNotIn("--pause", command)
+
+    def test_paused_starts_paused(self):
+        self.assertIn("--pause", speak.player_command("/s/plan.opus", paused=True))
 
 
 class PickTest(unittest.TestCase):
-    def test_the_chosen_plan_is_handed_to_a_new_worker(self):
-        tmp = Path(tempfile.mkdtemp()).resolve()
-        (tmp / "plan.md").write_text("# Plan")
-        chosen = f"{tmp / 'plan.md'}\t2026-09-30 10:00  plan.md\n"
-        config = dict(speak.DEFAULTS, spokenDir=str(tmp / "spoken"))
-        fzf = subprocess.CompletedProcess([], 0, stdout=chosen)
-        with mock.patch.object(speak, "load_config", return_value=config), \
-                mock.patch.object(speak.Path, "cwd", return_value=tmp), \
-                mock.patch.object(speak.subprocess, "run", return_value=fzf) as run, \
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp()).resolve()
+        self.plan = self.tmp / "plan.md"
+        self.plan.write_text("# Plan")
+        past = time.time() - 60
+        os.utime(self.plan, (past, past))
+        self.config = dict(speak.DEFAULTS, spokenDir=str(self.tmp / "spoken"))
+
+    def pick(self, fzf):
+        real_run, self.fzf_calls = subprocess.run, []
+
+        def run(command, *args, **kwargs):
+            if command[0] != "fzf":
+                return real_run(command, *args, **kwargs)
+            self.fzf_calls.append((command, kwargs))
+            return fzf
+
+        with mock.patch.object(speak, "load_config", return_value=self.config), \
+                mock.patch.object(speak.Path, "cwd", return_value=self.tmp), \
+                mock.patch.object(speak.subprocess, "run", side_effect=run), \
                 mock.patch.object(speak, "stop"), \
-                mock.patch.object(speak, "start_worker") as start, \
-                mock.patch.object(speak, "open_viewer") as viewer:
+                mock.patch.object(speak, "start_worker") as self.start, \
+                mock.patch.object(speak, "show_plan") as self.show, \
+                mock.patch.object(speak, "open_player") as self.player:
             speak.pick()
-        self.assertEqual(run.call_args.args[0][0], "fzf")
-        self.assertIn(str(tmp / "plan.md"), run.call_args.kwargs["input"])
-        start.assert_called_once_with(["--plan", str(tmp / "plan.md")])
-        viewer.assert_called_once_with(str(tmp / "plan.md"))
+
+    def chosen(self):
+        return subprocess.CompletedProcess([], 0, stdout=f"{self.plan}\t2026-09-30 10:00  plan.md\n")
+
+    def test_a_new_plan_is_shown_and_handed_to_a_worker(self):
+        self.pick(self.chosen())
+        [(command, kwargs)] = self.fzf_calls
+        self.assertIn(str(self.plan), kwargs["input"])
+        self.show.assert_called_once_with(str(self.plan))
+        self.start.assert_called_once_with(["--plan", str(self.plan)])
+        self.player.assert_not_called()
+
+    def test_a_plan_with_saved_audio_plays_in_the_player(self):
+        audio = speak.spoken_file(speak.spoken_base(self.plan, self.config), ".opus")
+        audio.parent.mkdir(parents=True)
+        audio.write_bytes(b"x")
+        self.pick(self.chosen())
+        self.show.assert_called_once_with(str(self.plan))
+        self.player.assert_called_once_with(str(self.plan), audio, paused=False)
+        self.start.assert_not_called()
 
     def test_a_missing_fzf_is_reported(self):
-        tmp = Path(tempfile.mkdtemp()).resolve()
-        (tmp / "plan.md").write_text("# Plan")
-        config = dict(speak.DEFAULTS, spokenDir=str(tmp / "spoken"))
-        with mock.patch.object(speak, "load_config", return_value=config), \
-                mock.patch.object(speak.Path, "cwd", return_value=tmp), \
+        with mock.patch.object(speak, "load_config", return_value=self.config), \
+                mock.patch.object(speak.Path, "cwd", return_value=self.tmp), \
                 mock.patch.object(speak.subprocess, "run", side_effect=FileNotFoundError("fzf")), \
                 mock.patch.object(speak, "notify") as notify, \
                 mock.patch.object(speak, "start_worker") as start:
@@ -472,18 +591,10 @@ class PickTest(unittest.TestCase):
         start.assert_not_called()
 
     def test_escape_starts_nothing(self):
-        tmp = Path(tempfile.mkdtemp()).resolve()
-        (tmp / "plan.md").write_text("# Plan")
-        config = dict(speak.DEFAULTS, spokenDir=str(tmp / "spoken"))
-        fzf = subprocess.CompletedProcess([], 130, stdout="")
-        with mock.patch.object(speak, "load_config", return_value=config), \
-                mock.patch.object(speak.Path, "cwd", return_value=tmp), \
-                mock.patch.object(speak.subprocess, "run", return_value=fzf), \
-                mock.patch.object(speak, "start_worker") as start, \
-                mock.patch.object(speak, "open_viewer") as viewer:
-            speak.pick()
-        start.assert_not_called()
-        viewer.assert_not_called()
+        self.pick(subprocess.CompletedProcess([], 130, stdout=""))
+        self.start.assert_not_called()
+        self.show.assert_not_called()
+        self.player.assert_not_called()
 
 
 if __name__ == "__main__":

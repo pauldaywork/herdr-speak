@@ -27,6 +27,7 @@ STATE_DIR = Path(os.environ.get("HERDR_PLUGIN_STATE_DIR") or ROOT / ".state")
 CONFIG_DIR = Path(os.environ.get("HERDR_PLUGIN_CONFIG_DIR") or ROOT)
 PID_FILE = STATE_DIR / "worker.pid"
 LOG_FILE = STATE_DIR / "speak.log"
+PANES_FILE = STATE_DIR / "panes.json"
 PROMPT = ROOT / "prompt.md"
 PLAN_PROMPT = ROOT / "prompt-plan.md"
 
@@ -612,6 +613,9 @@ def worker_plan(path):
         notify("Speak: can't read the plan", str(error))
         return
     say(text, config, prompt=PLAN_PROMPT, timeout=config["planRewriteTimeout"], save_to=base)
+    audio = saved_audio(source, base)
+    if audio:
+        open_player(str(source), audio, paused=True)
 
 
 # --- Picking a plan ------------------------------------------------------------
@@ -690,24 +694,125 @@ def pick():
         return
     path = choice.split("\t", 1)[0]
     stop()
-    start_worker(["--plan", path])
-    open_viewer(path)
+    show_plan(path)
+    source = Path(path).resolve()
+    audio = saved_audio(source, spoken_base(source, config))
+    if audio:
+        open_player(path, audio, paused=False)
+    else:
+        start_worker(["--plan", path])
 
 
-def open_viewer(path):
-    """Open the plan read-only in a pane to the right of the one the key was pressed in."""
-    herdr = os.environ.get("HERDR_BIN_PATH") or "herdr"
-    command = [
-        herdr, "plugin", "pane", "open",
-        "--plugin", os.environ.get("HERDR_PLUGIN_ID") or "speak",
-        "--entrypoint", "plan-view", "--placement", "split", "--direction", "right",
-        "--cwd", str(Path(path).parent), "--env", f"SPEAK_PLAN={path}", "--no-focus",
+def herdr(*args):
+    """Run a herdr CLI command, capturing its output."""
+    binary = os.environ.get("HERDR_BIN_PATH") or "herdr"
+    return subprocess.run([binary, *args], capture_output=True, text=True, check=False)
+
+
+def load_panes():
+    """The plan and player panes this plugin opened: {role: {"pane": id, "plan": path}}."""
+    try:
+        return json.loads(PANES_FILE.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def save_panes(panes):
+    PANES_FILE.write_text(json.dumps(panes))
+
+
+def live_pane(panes, role):
+    """The recorded pane for role ("plan" or "player"), if it is still open."""
+    entry = panes.get(role)
+    if entry and herdr("pane", "get", entry["pane"]).returncode == 0:
+        return entry
+    return None
+
+
+def close_pane(panes, role):
+    entry = live_pane(panes, role)
+    panes.pop(role, None)
+    if entry:
+        herdr("pane", "close", entry["pane"])
+
+
+def open_pane(entrypoint, direction, target, cwd, env):
+    """Open one of this plugin's panes as a split without taking focus, and return its id."""
+    args = [
+        "plugin", "pane", "open", "--plugin", os.environ.get("HERDR_PLUGIN_ID") or "speak",
+        "--entrypoint", entrypoint, "--placement", "split", "--direction", direction,
+        "--cwd", str(cwd),
     ]
-    if os.environ.get("SPEAK_TARGET_PANE"):
-        command += ["--target-pane", os.environ["SPEAK_TARGET_PANE"]]
-    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    for key, value in env.items():
+        args += ["--env", f"{key}={value}"]
+    args.append("--no-focus")
+    if target:
+        args += ["--target-pane", target]
+    result = herdr(*args)
     if result.returncode != 0:
-        notify("Speak: couldn't open the plan beside you", result.stderr.strip()[-300:])
+        notify("Speak: couldn't open a pane", result.stderr.strip()[-300:])
+        return None
+    try:
+        return json.loads(result.stdout)["result"]["plugin_pane"]["pane"]["pane_id"]
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
+def show_plan(path):
+    """Show the plan read-only beside the pane the key was pressed in.
+
+    A pane already showing this plan is kept; one showing another plan is
+    replaced, along with its player.
+    """
+    panes = load_panes()
+    shown = live_pane(panes, "plan")
+    if shown and shown["plan"] == path:
+        return
+    close_pane(panes, "plan")
+    close_pane(panes, "player")
+    pane = open_pane("plan-view", "right", os.environ.get("SPEAK_TARGET_PANE"), Path(path).parent, {"SPEAK_PLAN": path})
+    if pane:
+        panes["plan"] = {"pane": pane, "plan": path}
+    save_panes(panes)
+
+
+def open_player(path, audio, paused):
+    """Open mpv on the plan's saved audio under its pane, replacing any player already open."""
+    panes = load_panes()
+    close_pane(panes, "player")
+    shown = live_pane(panes, "plan")
+    if shown:
+        target, direction = shown["pane"], "down"
+    else:
+        target, direction = os.environ.get("SPEAK_TARGET_PANE"), "right"
+    env = {"SPEAK_AUDIO": str(audio)}
+    if paused:
+        env["SPEAK_PAUSE"] = "1"
+    pane = open_pane("plan-player", direction, target, Path(path).parent, env)
+    if pane:
+        panes["player"] = {"pane": pane, "plan": path}
+    save_panes(panes)
+
+
+def player_command(audio, paused):
+    """mpv on saved audio, kept open at the end, with a time line and progress bar."""
+    command = [
+        "mpv", "--no-video", "--audio-display=no", "--keep-open=yes", "--term-osd-bar",
+        "--msg-level=all=warn,statusline=status",
+        "--term-status-msg=${?pause==yes:Paused }${time-pos} / ${duration}",
+    ]
+    if paused:
+        command.append("--pause")
+    return command + [str(audio)]
+
+
+def run_player():
+    """Run in the player pane: become mpv on the audio the pane was opened with."""
+    command = player_command(os.environ["SPEAK_AUDIO"], bool(os.environ.get("SPEAK_PAUSE")))
+    try:
+        os.execvp(command[0], command)
+    except OSError:
+        notify("Speak: mpv not found", "Install mpv to replay and scrub saved plans.")
 
 
 def open_picker():
@@ -719,17 +824,14 @@ def open_picker():
     except ValueError:
         context = {}
     cwd = context.get("focused_pane_cwd") or str(Path.home())
-    herdr = os.environ.get("HERDR_BIN_PATH") or "herdr"
-    command = [
-        herdr, "plugin", "pane", "open",
-        "--plugin", os.environ.get("HERDR_PLUGIN_ID") or "speak",
-        "--entrypoint", "plan-picker", "--placement", "overlay",
-        "--cwd", cwd, "--focus",
+    args = [
+        "plugin", "pane", "open", "--plugin", os.environ.get("HERDR_PLUGIN_ID") or "speak",
+        "--entrypoint", "plan-picker", "--placement", "overlay", "--cwd", cwd, "--focus",
     ]
     # The picker runs in its own pane, so tell it which pane to open the plan beside.
     if os.environ.get("HERDR_PANE_ID"):
-        command += ["--env", f"SPEAK_TARGET_PANE={os.environ['HERDR_PANE_ID']}"]
-    result = subprocess.run(command, capture_output=True, text=True, check=False)
+        args += ["--env", f"SPEAK_TARGET_PANE={os.environ['HERDR_PANE_ID']}"]
+    result = herdr(*args)
     if result.returncode != 0:
         notify("Speak: couldn't open the plan picker", result.stderr.strip()[-300:])
 
@@ -792,8 +894,10 @@ def main(argv):
         open_picker()
     elif command == "pick":
         pick()
+    elif command == "player":
+        run_player()
     else:
-        print(f"usage: {argv[0]} toggle [--verbatim] | stop | plan | pick", file=sys.stderr)
+        print(f"usage: {argv[0]} toggle [--verbatim] | stop | plan | pick | player", file=sys.stderr)
         return 2
     return 0
 

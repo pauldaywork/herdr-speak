@@ -47,3 +47,11 @@ id = "plan-view"
 title = "Speak: plan"
 placement = "split"
 command = ["sh", "-c", "exec nvim -R \"$SPEAK_PLAN\""]
+
+# Opened under the plan's pane once its audio is saved: mpv with a progress bar,
+# so the plan can be replayed, paused and scrubbed. q closes it.
+[[panes]]
+id = "plan-player"
+title = "Speak: player · space pause · ←/→ 5s · ↑/↓ 1m · q close"
+placement = "split"
+command = ["sh", "-c", "exec python3 \"$HERDR_PLUGIN_ROOT/speak.py\" player"]
