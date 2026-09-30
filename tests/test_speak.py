@@ -1,10 +1,13 @@
+import base64
 import contextlib
+import http.server
 import io
 import json
 import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -64,6 +67,21 @@ class RewriteStreamTest(unittest.TestCase):
 
 def fake_synthesize(text, config):
     yield b"\0" * 4800  # 0.1 s of silence
+
+
+def fake_captioned(text, config):
+    return b"\0" * 4800, []  # 0.1 s of silence, no word timings
+
+
+# Word timings Kokoro returned for "It costs $5, e.g. about 3.5 times more. Then we stop! Why?"
+KOKORO_WORDS = [
+    {"word": w, "start_time": t} for w, t in [
+        ("It", -0.02), ("costs", 0.11), ("five", 0.48), ("dollars", 0.81), (",", 1.38),
+        ("e-g-", 1.48), ("about", 1.8), ("three", 2.05), ("point", 2.28), ("five", 2.56),
+        ("times", 2.88), ("more", 3.26), (".", 3.83), ("Then", 4.0), ("we", 4.15),
+        ("stop", 4.27), ("!", 4.78), ("Why", 4.92), ("?", 5.58),
+    ]
+]
 
 
 class PlayTest(unittest.TestCase):
@@ -177,7 +195,7 @@ class PlayFileTest(unittest.TestCase):
         tmp = Path(tempfile.mkdtemp())
         out = tmp / "played.pcm"
         config = dict(speak.DEFAULTS, player=["sh", "-c", f"cat > '{out}'"])
-        with mock.patch.multiple(speak, synthesize=fake_synthesize,
+        with mock.patch.multiple(speak, synthesize_captioned=fake_captioned,
                                  rewrite_stream=lambda text, config, prompt, timeout: iter(["Hello."])):
             speak.render("# Hello", config, tmp / "hello", timeout=5)
         speak.play_file(tmp / "hello.opus", config)
@@ -210,6 +228,7 @@ class WorkerPlanTest(unittest.TestCase):
             load_config=lambda: self.config,
             ensure_kokoro=lambda config: None,
             synthesize=fake_synthesize,
+            synthesize_captioned=fake_captioned,
             rewrite_stream=self.fake_rewrite,
         )
         fakes.update(patches)
@@ -283,9 +302,8 @@ class WorkerPlanTest(unittest.TestCase):
     def test_a_kokoro_failure_is_reported_and_nothing_plays(self):
         def down(text, config):
             raise speak.urllib.error.URLError("connection refused")
-            yield
 
-        used = self.run_worker(synthesize=down)
+        used = self.run_worker(synthesize_captioned=down)
         self.assertEqual(self.titles(used["notify"])[-1], "Speak: TTS failed")
         used["play"].assert_not_called()
         used["open_player"].assert_not_called()
@@ -308,14 +326,15 @@ class RenderTest(unittest.TestCase):
         self.base = Path(tempfile.mkdtemp()) / "proj" / "plan"
         self.config = dict(speak.DEFAULTS)
 
-    def render(self, rewrite):
-        with mock.patch.multiple(speak, rewrite_stream=rewrite, synthesize=fake_synthesize):
-            speak.render("# Plan", self.config, self.base, timeout=5)
+    def render(self, rewrite, captioned=fake_captioned, **kwargs):
+        with mock.patch.multiple(speak, rewrite_stream=rewrite, synthesize_captioned=captioned):
+            speak.render("# Plan", self.config, self.base, timeout=5, **kwargs)
 
     def test_saves_the_text_and_audio(self):
         self.render(lambda text, config, prompt, timeout: iter(["First step. Second step."]))
         self.assertEqual(speak.spoken_file(self.base, ".md").read_text(), "First step. Second step.\n")
         self.assertGreater(speak.spoken_file(self.base, ".opus").stat().st_size, 0)
+        self.assertFalse(speak.spoken_file(self.base, ".txt").exists())
 
     def test_a_failed_rewrite_raises_and_saves_nothing(self):
         def broken(text, config, prompt, timeout):
@@ -336,22 +355,134 @@ class RenderTest(unittest.TestCase):
         bin_dir = self.base.parent.parent
         fake_command(bin_dir, "ffmpeg", "#!/bin/sh\nexit 1\n")
 
-        def big(text, config):
-            for _ in range(5):
-                yield b"\0" * 200_000
-
         with mock.patch.dict(os.environ, {"PATH": f"{bin_dir}:{os.environ['PATH']}"}), \
-                mock.patch.multiple(speak, synthesize=big,
+                mock.patch.multiple(speak, synthesize_captioned=lambda text, config: (b"\0" * 1_000_000, []),
                                     rewrite_stream=lambda text, config, prompt, timeout: iter(["Speak this."])), \
                 contextlib.redirect_stderr(io.StringIO()) as note, self.assertRaises(RuntimeError):
             speak.render("# Plan", self.config, self.base, timeout=5)
         self.assertEqual(note.getvalue().count("encoder failed"), 1)
         self.assertEqual(list(self.base.parent.iterdir()), [])
 
+    def test_each_chunk_without_timings_is_one_lrc_line_at_its_audio_start(self):
+        # sentences() cuts after "here. " (20 chars); each chunk is 0.1 s of fake audio.
+        self.render(lambda text, config, prompt, timeout: iter(["First step is here. ", "Second step."]))
+        self.assertEqual(speak.spoken_file(self.base, ".lrc").read_text(),
+                         "[00:00.00]First step is here.\n[00:00.10]Second step.\n")
+
+    def test_kokoro_timings_split_a_chunk_into_sentences(self):
+        def captioned(text, config):
+            words = [{"word": "One", "start_time": 0.0}, {"word": ".", "start_time": 0.3},
+                     {"word": "Two", "start_time": 0.5}, {"word": ".", "start_time": 0.8}]
+            return b"\0" * 48000, words
+
+        self.render(lambda text, config, prompt, timeout: iter(["One. Two."]), captioned=captioned)
+        self.assertEqual(speak.spoken_file(self.base, ".lrc").read_text(), "[00:00.00]One.\n[00:00.50]Two.\n")
+
+    def test_keep_source_saves_the_raw_text(self):
+        self.render(lambda text, config, prompt, timeout: iter(["Spoken."]), keep_source=True)
+        self.assertEqual(speak.spoken_file(self.base, ".txt").read_text(), "# Plan")
+
+    def test_the_audio_appears_after_every_other_file(self):
+        seen, real_replace = set(), Path.replace
+
+        def replace(path, target):
+            seen.update(p.name for p in self.base.parent.iterdir())
+            return real_replace(path, target)
+
+        with mock.patch.object(speak.Path, "replace", replace):
+            self.render(lambda text, config, prompt, timeout: iter(["Spoken."]), keep_source=True)
+        self.assertEqual(seen, {"plan.txt", "plan.md", "plan.lrc", "plan.opus.part"})
+
+    def test_a_failed_rewrite_keeping_the_source_saves_nothing(self):
+        def broken(text, config, prompt, timeout):
+            yield "First step. "
+            raise RuntimeError("claude exited 1")
+
+        with self.assertRaises(RuntimeError):
+            self.render(broken, keep_source=True)
+        self.assertEqual(list(self.base.parent.iterdir()), [])
+
     def test_an_empty_rewrite_raises_and_saves_nothing(self):
         with self.assertRaises(RuntimeError):
             self.render(lambda text, config, prompt, timeout: iter([]))
         self.assertEqual(list(self.base.parent.iterdir()), [])
+
+
+class CaptionLinesTest(unittest.TestCase):
+    TEXT = "It costs $5, e.g. about 3.5 times more.\nThen we stop! Why?"
+
+    def test_sentences_start_at_kokoros_word_after_each_sentence_end(self):
+        self.assertEqual(speak.caption_lines(10.0, self.TEXT, KOKORO_WORDS), [
+            (10.0, "It costs $5, e.g. about 3.5 times more."),
+            (14.0, "Then we stop!"),
+            (14.92, "Why?"),
+        ])
+
+    def test_sentence_ends_that_dont_line_up_make_one_line(self):
+        text = "Mr. Smith left. Then we stop! Why?"  # "Mr. Smith" splits here but not in Kokoro's tokens
+        self.assertEqual(speak.caption_lines(10.0, text, KOKORO_WORDS), [(10.0, text)])
+
+    def test_no_timings_make_one_flattened_line(self):
+        self.assertEqual(speak.caption_lines(2.5, "One.\n\nTwo  three.", []), [(2.5, "One. Two three.")])
+
+    def test_a_single_sentence_is_one_line_whatever_the_timings(self):
+        self.assertEqual(speak.caption_lines(0.0, "Just one.", KOKORO_WORDS), [(0.0, "Just one.")])
+
+
+class LrcTest(unittest.TestCase):
+    def test_stamps_are_minutes_seconds_and_hundredths(self):
+        self.assertEqual(speak.lrc_stamp(0), "[00:00.00]")
+        self.assertEqual(speak.lrc_stamp(83.456), "[01:23.46]")
+        self.assertEqual(speak.lrc_stamp(59.999), "[01:00.00]")
+
+    def test_one_line_per_caption(self):
+        self.assertEqual(speak.lrc_text([(0.0, "One."), (1.5, "Two.")]), "[00:00.00]One.\n[00:01.50]Two.\n")
+
+
+class SynthesizeCaptionedTest(unittest.TestCase):
+    def setUp(self):
+        self.requests = []
+        test = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                test.requests.append((self.path, json.loads(self.rfile.read(int(self.headers["Content-Length"])))))
+                body = test.reply
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.server.shutdown)
+        self.addCleanup(self.server.server_close)
+        port = self.server.server_address[1]
+        self.config = dict(speak.DEFAULTS, baseUrl=f"http://127.0.0.1:{port}/v1", voice="af_bella")
+
+    def test_asks_the_dev_endpoint_for_pcm_with_timestamps(self):
+        words = [{"word": "Hi", "start_time": 0.0, "end_time": 0.2}]
+        self.reply = json.dumps({"audio": base64.b64encode(b"\1\2\3\4").decode(), "timestamps": words}).encode()
+        audio, got = speak.synthesize_captioned("Hi.", self.config)
+        self.assertEqual((audio, got), (b"\1\2\3\4", words))
+        [(path, body)] = self.requests
+        self.assertEqual(path, "/dev/captioned_speech")
+        self.assertEqual(body, {"model": "kokoro", "voice": "af_bella", "input": "Hi.", "speed": 1.0,
+                                "response_format": "pcm", "stream": False, "return_timestamps": True})
+
+    def test_a_reply_without_audio_raises(self):
+        self.reply = b'{"detail": "nope"}'
+        with self.assertRaises(RuntimeError):
+            speak.synthesize_captioned("Hi.", self.config)
+
+    def test_a_reply_that_isnt_json_raises(self):
+        self.reply = b"<html>"
+        with self.assertRaises(RuntimeError):
+            speak.synthesize_captioned("Hi.", self.config)
 
 
 class PlanFilesTest(unittest.TestCase):

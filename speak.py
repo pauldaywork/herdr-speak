@@ -7,6 +7,7 @@ or opens a picker pane (`speak.py pick`) whose choice is spoken and saved for
 replay. The work runs in a detached worker so the herdr action returns at once.
 """
 
+import base64
 import glob
 import json
 import os
@@ -360,7 +361,70 @@ def synthesize(text, config):
             yield chunk
 
 
+def synthesize_captioned(text, config):
+    """(PCM, word timings) for text from Kokoro's captioned speech endpoint.
+
+    The PCM is 24 kHz mono s16le like synthesize(); each timing is a dict with
+    word, start_time and end_time in seconds into that PCM.
+    """
+    parts = urllib.parse.urlsplit(config["baseUrl"])
+    body = json.dumps({
+        "model": config["model"],
+        "voice": config["voice"],
+        "input": text,
+        "speed": config["speed"],
+        "response_format": "pcm",
+        "stream": False,
+        "return_timestamps": True,
+    }).encode()
+    request = urllib.request.Request(
+        f"{parts.scheme}://{parts.netloc}/dev/captioned_speech",
+        data=body, headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(request, timeout=60) as response:
+        try:
+            reply = json.load(response)
+            return base64.b64decode(reply["audio"]), list(reply.get("timestamps") or [])
+        except (KeyError, TypeError, ValueError) as error:
+            raise RuntimeError(f"Kokoro's captioned speech reply had no audio ({error!r})") from error
+
+
 AUDIO_FORMAT = ["-f", "s16le", "-ar", "24000", "-ch_layout", "mono"]
+BYTES_PER_SECOND = 48000  # AUDIO_FORMAT: 24000 samples a second, 2 bytes each
+# A sentence ends where the next one starts with a capital, so "e.g. about" stays whole.
+SENTENCE_BREAK = re.compile(r"[.!?][\"')\]]*\s+(?=[\"'(\[]?[A-Z])")
+SENTENCE_TOKEN = re.compile(r"[.!?]+[\"')\]]*")
+
+
+def caption_lines(start, text, words):
+    """(seconds, sentence) captions for a chunk whose audio starts at start seconds.
+
+    words are Kokoro's timings within the chunk's audio; the word after each
+    sentence-ending token marks where the next sentence starts. Kokoro spells
+    out numbers and abbreviations, so when its sentence ends don't line up with
+    the text's, the whole chunk is one caption at start.
+    """
+    flat = " ".join(text.split())
+    cuts = [match.end() for match in SENTENCE_BREAK.finditer(flat)]
+    pieces = [flat[a:b].strip() for a, b in zip([0] + cuts, cuts + [len(flat)])]
+    starts = [
+        after.get("start_time", 0.0) for before, after in zip(words, words[1:])
+        if SENTENCE_TOKEN.fullmatch(before.get("word", ""))
+    ]
+    if len(starts) != len(pieces) - 1:
+        return [(start, flat)]
+    return [(start, pieces[0])] + [(start + max(0.0, t), piece) for t, piece in zip(starts, pieces[1:])]
+
+
+def lrc_stamp(seconds):
+    """An .lrc time tag, [mm:ss.cc]."""
+    centis = round(seconds * 100)
+    return f"[{centis // 6000:02d}:{centis // 100 % 60:02d}.{centis % 100:02d}]"
+
+
+def lrc_text(captions):
+    """An .lrc file: one time-tagged line per (seconds, text) caption."""
+    return "".join(f"{lrc_stamp(seconds)}{text}\n" for seconds, text in captions)
 
 
 def spoken_file(base, suffix):
@@ -369,19 +433,25 @@ def spoken_file(base, suffix):
 
 
 class Recording:
-    """Saves spoken text and its audio as <base>.md and <base>.opus.
+    """Saves spoken text, its captions and its audio as <base>.md, .lrc and .opus.
 
-    Audio is encoded to <base>.opus.part as it is written, and both files
-    appear only on finish(), so a stopped run never leaves a partial file that
+    With source, the text that was rewritten is saved too, as <base>.txt.
+    Audio is encoded to <base>.opus.part as it is written, and every file
+    appears only on finish(), so a stopped run never leaves a partial file that
     a later replay would trust.
     """
 
-    def __init__(self, base):
+    def __init__(self, base, source=None):
         self.base = Path(base)
+        self.source = source
         self.audio = spoken_file(self.base, ".opus")
         self.text = spoken_file(self.base, ".md")
+        self.lyrics = spoken_file(self.base, ".lrc")
+        self.raw = spoken_file(self.base, ".txt")
         self.partial = spoken_file(self.base, ".opus.part")
         self.parts = []
+        self.captions = []  # (seconds, sentence) for the .lrc
+        self.written = 0  # PCM bytes so far
         self.encoder = None
         self.finished = False
         self.failed = False
@@ -396,11 +466,14 @@ class Recording:
             stdin=subprocess.PIPE, stderr=subprocess.DEVNULL,
         )
 
-    def add_text(self, text):
+    def add_text(self, text, words=()):
+        """Note the chunk whose audio is written next; words are Kokoro's timings within it."""
         self.parts.append(text)
+        self.captions += caption_lines(self.written / BYTES_PER_SECOND, text, list(words))
 
     def write(self, audio):
         """Feed the encoder; if it has died, note it once and keep playback going."""
+        self.written += len(audio)
         if self.failed:
             return
         try:
@@ -415,8 +488,11 @@ class Recording:
         self.encoder.stdin.close()
         if self.encoder.wait() != 0:
             raise RuntimeError(f"ffmpeg exited {self.encoder.returncode} saving {self.audio}")
-        # Text first: replay trusts the audio, so it must be the last file to appear.
+        # Replay trusts the audio, so it must be the last file to appear.
+        if self.source is not None:
+            self.raw.write_text(self.source)
         self.text.write_text("\n\n".join(self.parts) + "\n")
+        self.lyrics.write_text(lrc_text(self.captions))
         self.partial.replace(self.audio)
         self.finished = True
 
@@ -573,18 +649,19 @@ def worker(verbatim):
     say(text, config, verbatim=verbatim)
 
 
-def render(text, config, base, prompt=PLAN_PROMPT, timeout=None):
-    """Rewrite text for listening and save the speech as <base>.md and <base>.opus, unplayed.
+def render(text, config, base, prompt=PLAN_PROMPT, timeout=None, keep_source=False):
+    """Rewrite text for listening and save the speech as <base>.md, .lrc and .opus, unplayed.
 
-    Raises when the rewrite or Kokoro fails, and then saves nothing.
+    With keep_source, text itself is saved as <base>.txt. Raises when the
+    rewrite or Kokoro fails, and then saves nothing.
     """
-    recording = Recording(base)
+    recording = Recording(base, source=text if keep_source else None)
     recording.start()
     try:
         for sentence in sentences(rewrite_stream(text, config, prompt, timeout)):
-            recording.add_text(sentence)
-            for audio in synthesize(sentence, config):
-                recording.write(audio)
+            audio, words = synthesize_captioned(sentence, config)
+            recording.add_text(sentence, words)
+            recording.write(audio)
         if not recording.parts:
             raise RuntimeError("the rewrite was empty")
         recording.finish()
