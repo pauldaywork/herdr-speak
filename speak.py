@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Read the focused herdr pane's last agent answer, a chosen plan file, or selected text aloud via Kokoro.
 
-`speak.py toggle [--verbatim]` starts speaking, or stops speech already in
-progress. `speak.py stop` only stops. `speak.py close` stops too, and closes every
-pane the plugin opened. `speak.py plan` stops speech in progress,
+`speak.py stop` stops speech in progress. `speak.py close` stops too, and
+closes every pane the plugin opened. `speak.py plan` stops speech in progress,
 or opens a picker pane (`speak.py pick`) that asks for files or the last
 answer. A picked plan is spoken and saved for replay. The last answer opens a
 paragraph picker (`speak.py paragraphs`) whose ticked paragraphs are spoken
@@ -40,7 +39,6 @@ LOG_FILE = STATE_DIR / "speak.log"
 PANES_FILE = STATE_DIR / "panes.json"
 ANSWER_FILE = STATE_DIR / "answer.md"  # the last answer, for the paragraph picker
 CHOSEN_FILE = STATE_DIR / "chosen.md"  # the paragraphs picked from it, for the worker
-PROMPT = ROOT / "prompt.md"
 PLAN_PROMPT = ROOT / "prompt-plan.md"
 
 DEFAULTS = {
@@ -326,7 +324,7 @@ def strip_markdown(text):
     return re.sub(r"[ \t]+", " ", text).strip()
 
 
-def rewrite_stream(text, config, prompt=PROMPT, timeout=None):
+def rewrite_stream(text, config, prompt, timeout=None):
     """Yield the spoken rewrite as it streams out of `claude -p`.
 
     prompt is the system prompt file; timeout defaults to rewriteTimeout.
@@ -632,12 +630,11 @@ def play_file(audio, config):
         raise RuntimeError(f"ffmpeg exited {decoder.returncode}, player exited {player.returncode}")
 
 
-def play(chunks, config, started=None):
+def play(chunks, config):
     """Speak each text chunk in order through one player process.
 
     Chunks are pulled on a separate thread so the rewrite keeps streaming while
-    earlier sentences play. started, if given, is called once, just before the
-    first audio reaches the player.
+    earlier sentences play.
     """
     pending = queue.Queue()
 
@@ -663,9 +660,6 @@ def play(chunks, config, started=None):
                 print(f"stopped partway: {item!r}", file=sys.stderr)
                 break
             for audio in synthesize(item, config):
-                if started:
-                    started()
-                    started = None
                 player.stdin.write(audio)
             spoke = True
         player.stdin.close()
@@ -681,40 +675,12 @@ def play(chunks, config, started=None):
     return spoke
 
 
-def say(text, config, verbatim=False, started=None):
-    """Rewrite text for listening and play it, reading the cleaned text if the rewrite fails.
-
-    started is passed on to play(), to learn when speech begins.
-    """
+def say_cleaned(text, config):
+    """Read text aloud with its markdown and code removed, unsaved: the fallback when a plan's rewrite fails."""
     try:
-        ensure_kokoro(config)
-    except (OSError, RuntimeError) as error:
-        notify("Speak: couldn't start Kokoro", str(error))
-        return
-    try:
-        if config["rewrite"] and not verbatim:
-            try:
-                play(sentences(rewrite_stream(text, config)), config, started=started)
-                return
-            except (OSError, RuntimeError) as error:
-                if isinstance(error, urllib.error.URLError):
-                    raise
-                print(f"rewrite failed, reading cleaned text instead: {error!r}", file=sys.stderr)
-        play([strip_markdown(text)], config, started=started)
+        play([strip_markdown(text)], config)
     except Exception as error:  # noqa: BLE001
         notify("Speak: TTS failed", f"{config['baseUrl']}: {error}")
-
-
-def worker(verbatim):
-    config = load_config()
-    try:
-        text = last_answer()
-    except Exception as error:  # noqa: BLE001 - every failure becomes a notification
-        notify("Speak: nothing to read", str(error))
-        return
-    # Nothing else opens for an answer, so leave any plan or selection panes be.
-    with preparing("the answer", replace=False):
-        say(text, config, verbatim=verbatim, started=close_preparing)
 
 
 def render(text, config, base, prompt=PLAN_PROMPT, timeout=None, keep_source=False):
@@ -788,7 +754,7 @@ def worker_plan(path):
         open_player(str(source), audio, paused=False)
     else:
         # The cleaned text is a degraded fallback, so it is streamed and never saved.
-        say(text, config, verbatim=True)
+        say_cleaned(text, config)
 
 
 # --- Speaking a selection ------------------------------------------------------
@@ -1130,16 +1096,16 @@ def key_pane():
     return os.environ.get("SPEAK_TARGET_PANE") or os.environ.get("HERDR_PANE_ID")
 
 
-def show_preparing(label, replace=True):
+def show_preparing(label):
     """Open a spinner pane beside the pane the key was pressed in.
 
-    label says what is preparing, such as "the plan". With replace, it takes
-    the place of any open text, captions and player panes, which the finished
-    ones will replace. Workers started from a picker target the key's pane
-    through SPEAK_TARGET_PANE; the others are still in that pane's environment.
+    label says what is preparing, such as "the plan". It takes the place of any
+    open text, captions and player panes, which the finished ones will replace.
+    Workers started from a picker target the key's pane through
+    SPEAK_TARGET_PANE; the others are still in that pane's environment.
     """
     panes = load_panes()
-    for role in ("preparing", "plan", "captions", "player") if replace else ("preparing",):
+    for role in ("preparing", "plan", "captions", "player"):
         close_pane(panes, role)
     target = key_pane()
     pane = open_pane("preparing", "right", target, Path.home(), {"SPEAK_LABEL": label})
@@ -1167,9 +1133,9 @@ def close_panes():
 
 
 @contextlib.contextmanager
-def preparing(label, replace=True):
+def preparing(label):
     """Show the spinner pane while the block runs, and close it however the block ends."""
-    show_preparing(label, replace=replace)
+    show_preparing(label)
     try:
         yield
     finally:
@@ -1382,17 +1348,12 @@ def exit_on_sigterm():
 
 def main(argv):
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    command = argv[1] if len(argv) > 1 else "toggle"
-    verbatim = "--verbatim" in argv
+    command = argv[1] if len(argv) > 1 else ""
 
     if command == "stop":
         stop()
     elif command == "close":
         close_panes()
-    elif command == "toggle":
-        if stop():
-            return
-        start_worker(["--verbatim"] if verbatim else [])
     elif command == "worker":
         exit_on_sigterm()
         try:
@@ -1402,8 +1363,6 @@ def main(argv):
                 worker_selection()
             elif "--answer" in argv:
                 worker_answer(argv[argv.index("--answer") + 1])
-            else:
-                worker(verbatim)
         finally:
             if running_worker() == os.getpid():
                 PID_FILE.unlink(missing_ok=True)
@@ -1422,7 +1381,7 @@ def main(argv):
     elif command == "captions":
         run_captions()
     else:
-        print(f"usage: {argv[0]} toggle [--verbatim] | stop | close | plan | selection | pick | paragraphs | player | captions | preparing",
+        print(f"usage: {argv[0]} stop | close | plan | selection | pick | paragraphs | player | captions | preparing",
               file=sys.stderr)
         return 2
     return 0

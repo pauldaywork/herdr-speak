@@ -2,22 +2,8 @@ id = "speak"
 name = "Speak"
 version = "0.1.0"
 min_herdr_version = "0.9.1"
-description = "Read the focused agent's last answer aloud through a local Kokoro TTS server"
+description = "Read a plan, a selection or paragraphs of the last agent answer aloud through a local Kokoro TTS server"
 platforms = ["linux", "macos"]
-
-# Press once to speak the focused pane's last Claude or pi answer; press again
-# while it is preparing or playing to stop it.
-[[actions]]
-id = "last"
-title = "Speak: read the last answer aloud (again to stop)"
-contexts = ["pane"]
-command = ["python3", "speak.py", "toggle"]
-
-[[actions]]
-id = "last-verbatim"
-title = "Speak: read the last answer as written, without the spoken rewrite"
-contexts = ["pane"]
-command = ["python3", "speak.py", "toggle", "--verbatim"]
 
 [[actions]]
 id = "stop"

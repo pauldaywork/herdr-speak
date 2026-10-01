@@ -1,16 +1,12 @@
 # herdr-speak
 
-A [herdr](https://herdr.dev/) plugin that reads the focused pane's last Claude Code or Pi answer aloud through a local [Kokoro-FastAPI](https://github.com/remsky/Kokoro-FastAPI) text-to-speech server. Press `prefix+shift+s` to hear it rewritten for listening, or `prefix+shift+v` to hear it as written. Press either key again to stop. Press `prefix+shift+f` to pick a markdown plan, or the paragraphs of the last answer you want, and hear it. Select text in copy mode (`prefix+[`) and press `prefix+shift+a` to hear just that part, with live captions.
-
-It finds the answer from the session herdr records for the pane. While the agent is still working, it reads the last finished answer instead of the one in progress.
+A [herdr](https://herdr.dev/) plugin that reads aloud, through a local [Kokoro-FastAPI](https://github.com/remsky/Kokoro-FastAPI) text-to-speech server, the parts of a Claude Code or Pi answer you pick, a markdown plan, or text you select. Press `prefix+shift+v` and pick **Last answer** to tick the paragraphs of the focused pane's last answer you want to hear, or **Files** to pick a plan. Select text in copy mode (`prefix+[`) and press `prefix+shift+a` to hear just that part. Each is shown beside the pane with live captions and a player. Press `prefix+shift+b` when you're done to close those panes.
 
 ## How it works
 
-The plugin rewrites the answer for listening with `claude -p` on Haiku, using the rules in `prompt.md`. It streams the rewrite sentence by sentence to Kokoro and plays the raw audio through `ffplay`, so speech starts within about two seconds. Until it does, a small pane to the right shows a spinner; it closes when speech starts, and leaves any open plan or selection panes alone. Extended thinking is turned off for the rewrite, because it can delay the first words by a minute. If the rewrite fails, the plugin reads the answer with the markdown and code removed. The `speak.last-verbatim` action always reads it that way.
-
 `speak.plan` opens an fzf picker over the focused pane that asks for **Files** or **Last answer**. Files lists the markdown files under the pane's working directory and in `~/.claude/plans`, newest first, with a preview. The picker skips hidden and dependency folders (such as `node_modules`) and looks at most six levels deep.
 
-The plugin then prepares the audio: it rewrites the plan with `prompt-plan.md`, which keeps every step and decision in order rather than shortening the plan, and renders the speech without playing it. This takes a few seconds for a short plan and longer for a long one. Meanwhile a pane to the right shows a spinner and the seconds so far, and pressing the key again cancels it. When the audio is ready, the plan opens read-only in `nvim` in a pane to the right. Under it, [sptlrx](https://github.com/raitonoberu/sptlrx) shows the spoken rewrite as live captions with the current sentence in bold, and under that an `mpv` player starts playing. Plans saved before captions existed have no `.lrc`, so they open with just the player until they are prepared again. Focus stays where it was. The player shows the time and a progress bar: space plays and pauses, the left and right arrows seek 5 seconds, up and down seek a minute, and `q` closes it. Quitting `nvim` closes the plan's pane. If the rewrite fails, the plan still opens and its text is read with the markdown removed, but nothing is saved.
+The plugin then prepares the audio: it rewrites the plan with `prompt-plan.md`, which keeps every step and decision in order rather than shortening the plan, and renders the speech without playing it. Extended thinking is turned off for the rewrite, because it can delay the first words by a minute. This takes a few seconds for a short plan and longer for a long one. Meanwhile a pane to the right shows a spinner and the seconds so far, and pressing the key again cancels it. When the audio is ready, the plan opens read-only in `nvim` in a pane to the right. Under it, [sptlrx](https://github.com/raitonoberu/sptlrx) shows the spoken rewrite as live captions with the current sentence in bold, and under that an `mpv` player starts playing. Plans saved before captions existed have no `.lrc`, so they open with just the player until they are prepared again. Focus stays where it was. The player shows the time and a progress bar: space plays and pauses, the left and right arrows seek 5 seconds, up and down seek a minute, and `q` closes it. Quitting `nvim` closes the plan's pane. If the rewrite fails, the plan still opens and its text is read with the markdown removed, but nothing is saved.
 
 The spoken text, its captions and the audio are saved as `spoken/<project>/<name>.md`, `.lrc` and `.opus` in the plugin state directory. That is outside every project and outside `~/.claude`, so an agent never mistakes them for a new plan. The `.lrc` has one line per spoken sentence, stamped with the time Kokoro started saying it (from Kokoro-FastAPI's `/dev/captioned_speech` word timings), so players such as sptlrx and mpv can show the text in step with the audio. The project is the repository name, the same for every worktree of that repository, or the folder name for a file outside git (so files in `~/.claude/plans` land in `spoken/plans/`). The name is the file's path within the repository, with `--` between folders, so `docs/README.md` is saved as `docs--README` and doesn't collide with `README.md`. Picking a plan whose saved audio is newer than the file skips the preparation and plays it straight away. Picking the same plan again reuses its text pane and reopens the captions and player; picking another plan replaces them.
 
@@ -20,13 +16,11 @@ It rewrites the selection with `prompt-plan.md` and prepares the audio, which ta
 
 Each selection is saved as `spoken/<project>/selection-<date>-<time>` with four files: `.txt` (the text you selected), `.md` (the spoken rewrite), `.lrc` (its captions) and `.opus`. The project is named the same way as for plans, from the focused pane's folder. A run that is cancelled or fails saves nothing. sptlrx runs with its own settings from the plugin state directory, so your own sptlrx config is left alone.
 
-Last answer is for when `speak.last` reads too much, such as the agent's interim notes between tool calls. A pane opens to the right of the agent's pane, where the audio panes go, replacing any that are open, and takes focus. It shows the answer split into paragraphs at blank lines, with each fenced code block kept whole, and every paragraph ticked. Move with the arrow keys, press Space to untick or tick a paragraph, and press Enter to hear the ticked ones in their original order. Esc closes the pane and does nothing. Enter does nothing while nothing is ticked. While the agent is working, the paragraphs come from its last finished answer, as with `speak.last`. After Enter, the spinner takes the pane's place, and the picked text is spoken exactly like a selection: it is rewritten with `prompt-plan.md`, saved as `spoken/<project>/selection-<date>-<time>`, and shown with live captions and a player. Pressing the key again while it prepares cancels it.
+Last answer reads the focused pane's last answer from the session herdr records for it, and lets you leave out what you don't want to hear, such as the agent's interim notes between tool calls. A pane opens to the right of the agent's pane, where the audio panes go, replacing any that are open, and takes focus. It shows the answer split into paragraphs at blank lines, with each fenced code block kept whole, and every paragraph ticked. Move with the arrow keys, press Space to untick or tick a paragraph, and press Enter to hear the ticked ones in their original order. Esc closes the pane and does nothing. Enter does nothing while nothing is ticked. While the agent is working, the paragraphs come from its last finished answer, not the one in progress. After Enter, the spinner takes the pane's place, and the picked text is spoken exactly like a selection: it is rewritten with `prompt-plan.md`, saved as `spoken/<project>/selection-<date>-<time>`, and shown with live captions and a player. Pressing the key again while it prepares cancels it.
 
 | Action | Suggested key | What it does |
 | --- | --- | --- |
-| `speak.last` | `prefix+shift+s` | Speak the last answer, rewritten for listening. Invoke again to stop. |
-| `speak.last-verbatim` | `prefix+shift+v` | Speak the last answer as written, with markdown and code removed. |
-| `speak.plan` | `prefix+shift+f` | Pick a markdown plan, or paragraphs of the last answer, prepare the audio, then show it beside the pane with live captions and a player. Invoke again to cancel preparing. |
+| `speak.plan` | `prefix+shift+v` | Pick a markdown plan, or paragraphs of the last answer, prepare the audio, then show it beside the pane with live captions and a player. Invoke again to cancel preparing. |
 | `speak.selection` | `prefix+shift+a` | Speak the selected text, rewritten for listening, and show it beside the pane with live captions and a player. Invoke again to cancel preparing. |
 | `speak.close` | `prefix+shift+b` | Stop any speech or preparing, and close the spinner, text, captions and player panes the plugin opened, leaving the layout as it was. |
 | `speak.stop` | | Stop playback. |
@@ -71,19 +65,7 @@ Then add this to `~/.config/herdr/config.toml` and run `herdr server reload-conf
 
 ```toml
 [[keys.command]]
-key = "prefix+shift+s"
-type = "plugin_action"
-command = "speak.last"
-description = "speak: read the last answer aloud (again to stop)"
-
-[[keys.command]]
 key = "prefix+shift+v"
-type = "plugin_action"
-command = "speak.last-verbatim"
-description = "speak: read the last answer as written, no rewrite (again to stop)"
-
-[[keys.command]]
-key = "prefix+shift+f"
 type = "plugin_action"
 command = "speak.plan"
 description = "speak: pick a plan file or last-answer paragraphs and read them aloud (again to cancel)"
@@ -101,7 +83,7 @@ command = "speak.close"
 description = "speak: stop and close the text, captions and player panes"
 ```
 
-Any of these keys stops an answer being spoken, or cancels a plan or selection being prepared, whichever key started it. Once a plan or selection is playing, `mpv` plays it, so press `q` in the player to stop it. When you're done, `prefix+shift+b` stops everything and closes every pane the plugin opened in one go; panes you closed yourself are skipped, and your own panes are never touched.
+Any of these keys cancels a plan, selection or picked answer being prepared, whichever key started it. Once a plan or selection is playing, `mpv` plays it, so press `q` in the player to stop it. When you're done, `prefix+shift+b` stops everything and closes every pane the plugin opened in one go; panes you closed yourself are skipped, and your own panes are never touched.
 
 The plan, selection and close keys avoid herdr's own bindings: `prefix+shift+p` renames a pane, `prefix+shift+r` reloads the config and `prefix+shift+x` closes a tab.
 
@@ -127,7 +109,7 @@ The voice, speed, and server come from `~/.pi/speak.json` when it exists, so Pi'
 }
 ```
 
-`planRewriteTimeout` is how many seconds a plan's rewrite may take, which is longer than for answers because plans are long. `spokenDir` is where spoken plans and selections are saved. Keep it outside your projects and `~/.claude`. A selection's rewrite uses `rewriteTimeout` and always happens, even with `"rewrite": false`.
+`planRewriteTimeout` is how many seconds a plan's rewrite may take, which is longer than for selections because plans are long. `spokenDir` is where spoken plans and selections are saved. Keep it outside your projects and `~/.claude`. A selection's or picked answer's rewrite uses `rewriteTimeout` and always happens, even with `"rewrite": false`, which only makes plans read as written.
 
 Set `autoStart` to `false` to stop the plugin from starting Docker. When the plugin creates the container, it picks the image from the GPU's compute capability. It uses `ghcr.io/remsky/kokoro-fastapi-gpu:latest-cu128` for an RTX 50-series or other Blackwell GPU and `ghcr.io/remsky/kokoro-fastapi-gpu:latest` for an RTX 30 or 40 series. To override the choice, set `"image"` in `config.json`.
 
