@@ -202,6 +202,45 @@ def last_answer(pane_id=None):
     return text
 
 
+FENCE = re.compile(r"^\s*(```|~~~)")
+
+
+def paragraphs(text):
+    """text split at blank lines into paragraphs, each fenced code block kept whole."""
+    found, current, fence = [], [], None
+    for line in text.splitlines():
+        marker = FENCE.match(line)
+        if fence:
+            current.append(line)
+            if marker and marker.group(1) == fence:
+                fence = None
+        elif marker:
+            current.append(line)
+            fence = marker.group(1)
+        elif line.strip():
+            current.append(line)
+        elif current:
+            found.append("\n".join(current))
+            current = []
+    if current:
+        found.append("\n".join(current))
+    return found
+
+
+def paragraph_input(paras):
+    """fzf --read0 input: each paragraph after its index and a tab, ended by a NUL."""
+    return "".join(f"{index}\t{para}\0" for index, para in enumerate(paras))
+
+
+def chosen_text(paras, output):
+    """The paragraphs whose indices fzf printed (NUL-separated), in their original order, joined by blank lines.
+
+    fzf prints them in the order they were ticked, so they are sorted back.
+    """
+    picked = sorted({int(index) for index in output.split("\0") if index.strip().isdigit()})
+    return "\n\n".join(paras[index] for index in picked if index < len(paras))
+
+
 # --- Starting Kokoro --------------------------------------------------------
 
 

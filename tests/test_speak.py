@@ -193,6 +193,39 @@ class LastAnswerPaneTest(unittest.TestCase):
             speak.last_answer()
 
 
+class ParagraphsTest(unittest.TestCase):
+    def test_blank_lines_split_paragraphs(self):
+        self.assertEqual(speak.paragraphs("One.\n\nTwo\nlines.\n\n\nThree.\n"), ["One.", "Two\nlines.", "Three."])
+
+    def test_a_line_of_spaces_is_blank(self):
+        self.assertEqual(speak.paragraphs("A\n   \nB"), ["A", "B"])
+
+    def test_a_fenced_code_block_with_blank_lines_stays_whole(self):
+        text = "Intro.\n\n```py\na = 1\n\nb = 2\n```\n\nAfter."
+        self.assertEqual(speak.paragraphs(text), ["Intro.", "```py\na = 1\n\nb = 2\n```", "After."])
+
+    def test_a_tilde_fence_is_closed_only_by_tildes(self):
+        text = "~~~\n```\n\nstill code\n~~~\n\nAfter."
+        self.assertEqual(speak.paragraphs(text), ["~~~\n```\n\nstill code\n~~~", "After."])
+
+    def test_an_unclosed_fence_keeps_the_rest_whole(self):
+        self.assertEqual(speak.paragraphs("Intro.\n\n```\nx\n\ny"), ["Intro.", "```\nx\n\ny"])
+
+    def test_nothing_but_blank_lines_has_no_paragraphs(self):
+        self.assertEqual(speak.paragraphs("\n \n\n"), [])
+
+    def test_fzf_input_numbers_each_paragraph_and_ends_each_with_nul(self):
+        self.assertEqual(speak.paragraph_input(["One.", "Two\nlines."]), "0\tOne.\x001\tTwo\nlines.\x00")
+
+    def test_picked_paragraphs_keep_their_original_order(self):
+        # fzf prints them in the order they were ticked.
+        paras = ["One.", "Two.", "```\ncode\n```"]
+        self.assertEqual(speak.chosen_text(paras, "2\x000\x00"), "One.\n\n```\ncode\n```")
+
+    def test_nothing_picked_is_empty(self):
+        self.assertEqual(speak.chosen_text(["One."], ""), "")
+
+
 class SpokenPathsTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
