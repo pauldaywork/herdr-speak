@@ -159,6 +159,40 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(used["notify"].call_args.args[0], "Speak: nothing to read")
 
 
+FAKE_HERDR_SNAPSHOT = """#!/bin/sh
+cat "$FAKE_SNAPSHOT"
+"""
+
+
+class LastAnswerPaneTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        transcript = self.tmp / "session.jsonl"
+        transcript.write_text("".join(json.dumps(entry) + "\n" for entry in [
+            {"type": "user", "message": {"content": "Question?"}},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "The agent's answer."}]}},
+        ]))
+        snapshot = {"result": {"snapshot": {"focused_pane_id": "overlay", "panes": [
+            {"pane_id": "overlay"},
+            {"pane_id": "agent", "agent": "claude", "agent_status": "idle",
+             "agent_session": {"kind": "path", "value": str(transcript)}},
+        ]}}}
+        (self.tmp / "snapshot.json").write_text(json.dumps(snapshot))
+        self.env = {
+            "HERDR_BIN_PATH": str(fake_command(self.tmp, "herdr", FAKE_HERDR_SNAPSHOT)),
+            "FAKE_SNAPSHOT": str(self.tmp / "snapshot.json"),
+            "HERDR_PANE_ID": "overlay",
+        }
+
+    def test_a_pane_id_reads_that_panes_answer_not_the_overlays(self):
+        with mock.patch.dict(os.environ, self.env):
+            self.assertEqual(speak.last_answer("agent"), "The agent's answer.")
+
+    def test_without_a_pane_id_it_reads_the_pane_the_key_was_pressed_in(self):
+        with mock.patch.dict(os.environ, self.env), self.assertRaisesRegex(RuntimeError, "no supported agent"):
+            speak.last_answer()
+
+
 class SpokenPathsTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())

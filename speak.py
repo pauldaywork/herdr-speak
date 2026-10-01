@@ -88,11 +88,12 @@ def notify(title, body=None):
 # --- Finding the last answer -------------------------------------------------
 
 
-def focused_pane():
+def focused_pane(pane_id=None):
+    """The pane pane_id, else the pane the key was pressed in, else herdr's focused pane."""
     herdr = os.environ.get("HERDR_BIN_PATH") or "herdr"
     out = subprocess.run([herdr, "api", "snapshot"], capture_output=True, text=True, check=True).stdout
     snapshot = json.loads(out)["result"]["snapshot"]
-    pane_id = os.environ.get("HERDR_PANE_ID") or snapshot.get("focused_pane_id")
+    pane_id = pane_id or os.environ.get("HERDR_PANE_ID") or snapshot.get("focused_pane_id")
     for pane in snapshot.get("panes", []):
         if pane.get("pane_id") == pane_id:
             return pane
@@ -184,8 +185,9 @@ def pi_transcript(session, cwd):
     return max(files, key=os.path.getmtime)
 
 
-def last_answer():
-    pane = focused_pane()
+def last_answer(pane_id=None):
+    """The last answer of the agent in pane_id, or in the pane the key was pressed in."""
+    pane = focused_pane(pane_id)
     agent = pane.get("agent")
     session = pane.get("agent_session") or {}
     working = pane.get("agent_status") == "working"
