@@ -25,6 +25,14 @@ title = "Speak: stop playback"
 contexts = ["pane"]
 command = ["python3", "speak.py", "stop"]
 
+# Press when done to stop any speech and close every pane the plugin opened:
+# the spinner, the text, the captions and the player.
+[[actions]]
+id = "close"
+title = "Speak: stop and close the text, captions and player panes"
+contexts = ["pane"]
+command = ["python3", "speak.py", "close"]
+
 # Press to pick a markdown plan, or paragraphs of the last answer, and hear it;
 # press again while it is preparing to cancel.
 [[actions]]

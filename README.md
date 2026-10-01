@@ -28,6 +28,7 @@ Last answer is for when `speak.last` reads too much, such as the agent's interim
 | `speak.last-verbatim` | `prefix+shift+v` | Speak the last answer as written, with markdown and code removed. |
 | `speak.plan` | `prefix+shift+f` | Pick a markdown plan, or paragraphs of the last answer, prepare the audio, then show it beside the pane with live captions and a player. Invoke again to cancel preparing. |
 | `speak.selection` | `prefix+shift+a` | Speak the selected text, rewritten for listening, and show it beside the pane with live captions and a player. Invoke again to cancel preparing. |
+| `speak.close` | `prefix+shift+b` | Stop any speech or preparing, and close the spinner, text, captions and player panes the plugin opened, leaving the layout as it was. |
 | `speak.stop` | | Stop playback. |
 
 ## Requirements
@@ -92,11 +93,17 @@ key = "prefix+shift+a"
 type = "plugin_action"
 command = "speak.selection"
 description = "speak: read the selected text aloud (again to cancel)"
+
+[[keys.command]]
+key = "prefix+shift+b"
+type = "plugin_action"
+command = "speak.close"
+description = "speak: stop and close the text, captions and player panes"
 ```
 
-Any of these keys stops an answer being spoken, or cancels a plan or selection being prepared, whichever key started it. Once a plan or selection is playing, `mpv` plays it, so press `q` in the player to stop it.
+Any of these keys stops an answer being spoken, or cancels a plan or selection being prepared, whichever key started it. Once a plan or selection is playing, `mpv` plays it, so press `q` in the player to stop it. When you're done, `prefix+shift+b` stops everything and closes every pane the plugin opened in one go; panes you closed yourself are skipped, and your own panes are never touched.
 
-The plan and selection keys avoid herdr's own bindings: `prefix+shift+p` renames a pane and `prefix+shift+r` reloads the config.
+The plan, selection and close keys avoid herdr's own bindings: `prefix+shift+p` renames a pane, `prefix+shift+r` reloads the config and `prefix+shift+x` closes a tab.
 
 For Pi panes, run `herdr integration install pi` so herdr records Pi's session. Without it, the plugin falls back to the newest Pi session in the pane's working directory.
 

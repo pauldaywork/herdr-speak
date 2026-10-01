@@ -1150,6 +1150,27 @@ class PanesTest(unittest.TestCase):
         self.assertEqual(self.calls("pane close"), ["pane close p1"])
         self.assertEqual(json.loads(speak.PANES_FILE.read_text()), {})
 
+    def test_close_stops_speech_and_closes_every_audio_pane(self):
+        speak.show_selection(self.saved("selection-1"))
+        with mock.patch.object(speak, "stop") as stop:
+            speak.close_panes()
+        stop.assert_called_once_with()
+        self.assertEqual(sorted(self.calls("pane close")), ["pane close p1", "pane close p2", "pane close p3"])
+        self.assertEqual(json.loads(speak.PANES_FILE.read_text()), {})
+
+    def test_close_skips_panes_already_closed_by_hand(self):
+        speak.show_selection(self.saved("selection-1"))
+        self.live.write_text("")
+        with mock.patch.object(speak, "stop"):
+            speak.close_panes()
+        self.assertEqual(self.calls("pane close"), [])
+        self.assertEqual(json.loads(speak.PANES_FILE.read_text()), {})
+
+    def test_the_cli_command_closes_the_panes(self):
+        with mock.patch.object(speak, "close_panes") as close:
+            self.assertEqual(speak.main(["speak.py", "close"]), 0)
+        close.assert_called_once_with()
+
     def test_a_failure_is_reported(self):
         failing = fake_command(self.tmp, "herdr-fails", "#!/bin/sh\necho 'no such pane' >&2\nexit 1\n")
         with mock.patch.dict(os.environ, {"HERDR_BIN_PATH": str(failing)}), \
@@ -1503,6 +1524,10 @@ class ManifestTest(unittest.TestCase):
         self.assertNotIn("text-view", [p["id"] for p in self.manifest["panes"]])
         [pane] = [p for p in self.manifest["panes"] if p["id"] == "plan-view"]
         self.assertEqual(pane["command"], ["sh", "-c", 'exec nvim -R -c "set filetype=markdown" "$SPEAK_PLAN"'])
+
+    def test_the_close_action_runs_speak_close(self):
+        [action] = [a for a in self.manifest["actions"] if a["id"] == "close"]
+        self.assertEqual(action["command"], ["python3", "speak.py", "close"])
 
     def test_the_preparing_pane_runs_speak_preparing(self):
         [pane] = [p for p in self.manifest["panes"] if p["id"] == "preparing"]

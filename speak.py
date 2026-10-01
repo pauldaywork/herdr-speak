@@ -2,7 +2,8 @@
 """Read the focused herdr pane's last agent answer, a chosen plan file, or selected text aloud via Kokoro.
 
 `speak.py toggle [--verbatim]` starts speaking, or stops speech already in
-progress. `speak.py stop` only stops. `speak.py plan` stops speech in progress,
+progress. `speak.py stop` only stops. `speak.py close` stops too, and closes every
+pane the plugin opened. `speak.py plan` stops speech in progress,
 or opens a picker pane (`speak.py pick`) that asks for files or the last
 answer. A picked plan is spoken and saved for replay. The last answer opens a
 paragraph picker (`speak.py paragraphs`) whose ticked paragraphs are spoken
@@ -1153,6 +1154,18 @@ def close_preparing():
     save_panes(panes)
 
 
+def close_panes():
+    """The speak.close action: stop any speech or preparing, and close every pane this plugin opened.
+
+    Panes already closed by hand are skipped, and no other pane is touched.
+    """
+    stop()
+    panes = load_panes()
+    for role in ("preparing", "plan", "captions", "player"):
+        close_pane(panes, role)
+    save_panes(panes)
+
+
 @contextlib.contextmanager
 def preparing(label, replace=True):
     """Show the spinner pane while the block runs, and close it however the block ends."""
@@ -1374,6 +1387,8 @@ def main(argv):
 
     if command == "stop":
         stop()
+    elif command == "close":
+        close_panes()
     elif command == "toggle":
         if stop():
             return
@@ -1407,7 +1422,7 @@ def main(argv):
     elif command == "captions":
         run_captions()
     else:
-        print(f"usage: {argv[0]} toggle [--verbatim] | stop | plan | selection | pick | paragraphs | player | captions | preparing",
+        print(f"usage: {argv[0]} toggle [--verbatim] | stop | close | plan | selection | pick | paragraphs | player | captions | preparing",
               file=sys.stderr)
         return 2
     return 0
