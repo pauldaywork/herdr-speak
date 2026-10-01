@@ -1,4 +1,14 @@
-# herdr-speak
+# herdr-speak (work in progress)
+
+herdr-speak reads your coding agent's answers and plans aloud inside herdr, so you can listen instead of reading. It shows live captions and a player beside the pane. It's a work in progress and isn't ready for other people to use yet.
+
+![The paragraph picker open beside a Claude Code pane](docs/readme/pick-paragraphs.png)
+
+*Pick the paragraphs of the agent's last answer you want to hear. Space ticks or unticks a paragraph, and Enter speaks the ticked ones.*
+
+![The spoken text, live captions and player beside a Claude Code pane](docs/readme/captions-and-player.png)
+
+*While it speaks, the text opens in `nvim` with the live captions under it, the current sentence highlighted, and an `mpv` player under that.*
 
 A [herdr](https://herdr.dev/) plugin that reads aloud, through a local [Kokoro-FastAPI](https://github.com/remsky/Kokoro-FastAPI) text-to-speech server, the parts of a Claude Code or Pi answer you pick, a markdown plan, or text you select. Press `prefix+shift+v` and pick **Last answer** to tick the paragraphs of the focused pane's last answer you want to hear, or **Files** to pick a plan. Select text in copy mode (`prefix+[`) and press `prefix+shift+a` to hear just that part. Each is shown beside the pane with live captions and a player. Press `prefix+shift+b` when you're done to close those panes.
 
