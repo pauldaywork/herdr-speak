@@ -313,6 +313,7 @@ def ensure_kokoro(config):
 # --- Turning it into speech --------------------------------------------------
 
 
+# Adapted from privateer-speak's stripMarkdown (src/distill.ts, MIT, (c) 2026 Patrick (zahnno)).
 def strip_markdown(text):
     text = re.sub(r"```.*?(```|$)", " ", text, flags=re.S)
     text = re.sub(r"^\s*\|.*\|\s*$", " ", text, flags=re.M)

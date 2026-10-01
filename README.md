@@ -116,3 +116,13 @@ Set `autoStart` to `false` to stop the plugin from starting Docker. When the plu
 `player` can also be set to another command that plays raw 24 kHz mono 16-bit PCM from standard input, such as `["pw-play", "--rate", "24000", "--channels", "1", "--format", "s16", "-"]`.
 
 Errors appear as herdr notifications. The worker log is at `~/.local/state/herdr/plugins/speak/speak.log`.
+
+## Privacy
+
+Text sent to `speak.plan` and `speak.selection` is rewritten by `claude -p`, so it goes to Anthropic through your own Claude Code login. The audio is made by your Kokoro server, which by default runs locally on `127.0.0.1`. Spoken text, captions and audio are kept under `~/.local/state/herdr/plugins/speak/`.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
+
+The markdown stripping in `speak.py` is adapted from [privateer-speak](https://pi.dev/packages/privateer-speak) by Patrick (zahnno), also MIT licensed.
