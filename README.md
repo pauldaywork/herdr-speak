@@ -20,13 +20,13 @@ It rewrites the selection with `prompt-plan.md` and prepares the audio, which ta
 
 Each selection is saved as `spoken/<project>/selection-<date>-<time>` with four files: `.txt` (the text you selected), `.md` (the spoken rewrite), `.lrc` (its captions) and `.opus`. The project is named the same way as for plans, from the focused pane's folder. A run that is cancelled or fails saves nothing. sptlrx runs with its own settings from the plugin state directory, so your own sptlrx config is left alone.
 
-| Action | What it does |
-| --- | --- |
-| `speak.last` | Speak the last answer, rewritten for listening. Invoke again to stop. |
-| `speak.last-verbatim` | Speak the last answer as written, with markdown and code removed. |
-| `speak.plan` | Pick a markdown plan, prepare its audio, then show it beside the pane with live captions and a player. Invoke again to cancel preparing. |
-| `speak.selection` | Speak the selected text, rewritten for listening, and show it beside the pane with live captions and a player. Invoke again to cancel preparing. |
-| `speak.stop` | Stop playback. |
+| Action | Suggested key | What it does |
+| --- | --- | --- |
+| `speak.last` | `prefix+shift+s` | Speak the last answer, rewritten for listening. Invoke again to stop. |
+| `speak.last-verbatim` | `prefix+shift+v` | Speak the last answer as written, with markdown and code removed. |
+| `speak.plan` | `prefix+shift+f` | Pick a markdown plan, prepare its audio, then show it beside the pane with live captions and a player. Invoke again to cancel preparing. |
+| `speak.selection` | `prefix+shift+a` | Speak the selected text, rewritten for listening, and show it beside the pane with live captions and a player. Invoke again to cancel preparing. |
+| `speak.stop` | | Stop playback. |
 
 ## Requirements
 
@@ -83,7 +83,7 @@ description = "speak: read the last answer as written, no rewrite (again to stop
 key = "prefix+shift+f"
 type = "plugin_action"
 command = "speak.plan"
-description = "speak: pick a plan file and read it aloud (again to stop)"
+description = "speak: pick a plan file and read it aloud (again to cancel)"
 
 [[keys.command]]
 key = "prefix+shift+a"
@@ -92,7 +92,9 @@ command = "speak.selection"
 description = "speak: read the selected text aloud (again to cancel)"
 ```
 
-Either key stops speech that is already playing, whichever one started it.
+Any of these keys stops an answer being spoken, or cancels a plan or selection being prepared, whichever key started it. Once a plan or selection is playing, `mpv` plays it, so press `q` in the player to stop it.
+
+The plan and selection keys avoid herdr's own bindings: `prefix+shift+p` renames a pane and `prefix+shift+r` reloads the config.
 
 For Pi panes, run `herdr integration install pi` so herdr records Pi's session. Without it, the plugin falls back to the newest Pi session in the pane's working directory.
 
