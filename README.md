@@ -119,7 +119,7 @@ Errors appear as herdr notifications. The worker log is at `~/.local/state/herdr
 
 ## Privacy
 
-Text sent to `speak.plan` and `speak.selection` is rewritten by `claude -p`, so it goes to Anthropic through your own Claude Code login. The audio is made by your Kokoro server, which by default runs locally on `127.0.0.1`. Spoken text, captions and audio are kept under `~/.local/state/herdr/plugins/speak/`.
+The plan files, selections and last-answer paragraphs you pick are rewritten for listening by `claude -p`, so their text goes to Anthropic through your own Claude Code login. With `"rewrite": false`, plans are read as written and are not sent; selections and last-answer paragraphs are always rewritten. The audio is made by the Kokoro server at `baseUrl`, which by default runs locally on `127.0.0.1`. If you point `baseUrl` at another host, the spoken text goes there too. The spoken text, captions and audio are saved in the plugin state directory (`~/.local/state/herdr/plugins/speak/`), or under `spokenDir` if you set it. The last answer and the paragraphs you picked from it are kept in the state directory as `answer.md` and `chosen.md`.
 
 ## License
 
