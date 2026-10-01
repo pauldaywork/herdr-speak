@@ -813,24 +813,45 @@ def speak_selection():
 
 def worker_selection():
     """Rewrite the selected text and save its speech, then show it with captions and a player."""
-    config = load_config()
     context = plugin_context()
-    text = context.get("selected_text") or ""
-    base = selection_base(context.get("focused_pane_cwd") or Path.home(), config)
-    with preparing("the selection"):
+    cwd = context.get("focused_pane_cwd") or Path.home()
+    prepare_selection(context.get("selected_text") or "", cwd, "the selection")
+
+
+def worker_answer(path):
+    """Speak the paragraphs picked from the last answer, saved at path, the way a selection is spoken.
+
+    The paragraph picker starts this worker in the key pane's cwd, which names the project.
+    """
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as error:
+        notify("Speak: nothing to read", str(error))
+        return
+    prepare_selection(text, Path.cwd(), "the answer")
+
+
+def prepare_selection(text, cwd, label):
+    """Rewrite text and save its speech as a selection of cwd's project, then show it with captions and a player.
+
+    label says what is preparing, such as "the selection".
+    """
+    config = load_config()
+    base = selection_base(cwd, config)
+    with preparing(label):
         try:
             ensure_kokoro(config)
         except (OSError, RuntimeError) as error:
             notify("Speak: couldn't start Kokoro", str(error))
             return
-        notify("Speak: preparing the selection", "It plays once the audio is ready. Press the key again to cancel.")
+        notify(f"Speak: preparing {label}", "It plays once the audio is ready. Press the key again to cancel.")
         try:
             render(text, config, base, prompt=PLAN_PROMPT, timeout=config["rewriteTimeout"], keep_source=True)
         except (OSError, RuntimeError) as error:
             if isinstance(error, urllib.error.URLError):
                 notify("Speak: TTS failed", f"{config['baseUrl']}: {error}")
             else:
-                notify("Speak: couldn't prepare the selection", str(error))
+                notify(f"Speak: couldn't prepare {label}", str(error))
             return
     show_selection(base)
 
@@ -1052,18 +1073,23 @@ def run_player():
 SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 
+def key_pane():
+    """The pane the key was pressed in: SPEAK_TARGET_PANE from inside a picker, else HERDR_PANE_ID."""
+    return os.environ.get("SPEAK_TARGET_PANE") or os.environ.get("HERDR_PANE_ID")
+
+
 def show_preparing(label, replace=True):
     """Open a spinner pane beside the pane the key was pressed in.
 
     label says what is preparing, such as "the plan". With replace, it takes
     the place of any open text, captions and player panes, which the finished
-    ones will replace. The picker's worker targets the key's pane through
-    SPEAK_TARGET_PANE; the other workers are still in that pane's environment.
+    ones will replace. Workers started from a picker target the key's pane
+    through SPEAK_TARGET_PANE; the others are still in that pane's environment.
     """
     panes = load_panes()
     for role in ("preparing", "plan", "captions", "player") if replace else ("preparing",):
         close_pane(panes, role)
-    target = os.environ.get("SPEAK_TARGET_PANE") or os.environ.get("HERDR_PANE_ID")
+    target = key_pane()
     pane = open_pane("preparing", "right", target, Path.home(), {"SPEAK_LABEL": label})
     if pane:
         panes["preparing"] = {"pane": pane, "plan": label}
@@ -1117,7 +1143,7 @@ def show_selection(base):
         close_pane(panes, role)
     base = Path(base)
     text = str(spoken_file(base, ".txt"))
-    view = open_pane("plan-view", "right", os.environ.get("HERDR_PANE_ID"), base.parent, {"SPEAK_PLAN": text})
+    view = open_pane("plan-view", "right", key_pane(), base.parent, {"SPEAK_PLAN": text})
     if view:
         panes["plan"] = {"pane": view, "plan": text}
     save_panes(panes)
@@ -1247,6 +1273,8 @@ def main(argv):
                 worker_plan(argv[argv.index("--plan") + 1])
             elif "--selection" in argv:
                 worker_selection()
+            elif "--answer" in argv:
+                worker_answer(argv[argv.index("--answer") + 1])
             else:
                 worker(verbatim)
         finally:

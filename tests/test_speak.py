@@ -938,6 +938,64 @@ class WorkerSelectionTest(unittest.TestCase):
         self.assertEqual(self.rewrites, [])
 
 
+class WorkerAnswerTest(unittest.TestCase):
+    CHOSEN = "First kept paragraph.\n\nSecond kept paragraph."
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        (self.tmp / "proj").mkdir()
+        self.chosen = self.tmp / "chosen.md"
+        self.chosen.write_text(self.CHOSEN)
+        self.config = dict(speak.DEFAULTS, spokenDir=str(self.tmp / "spoken"))
+        self.rewrites = []
+
+    def fake_rewrite(self, text, config, prompt, timeout):
+        self.rewrites.append((text, prompt, timeout))
+        return iter(["Two paragraphs. Said aloud."])
+
+    def run_worker(self, path=None, **patches):
+        fakes = dict(load_config=lambda: self.config, ensure_kokoro=lambda config: None,
+                     synthesize_captioned=fake_captioned, rewrite_stream=self.fake_rewrite)
+        fakes.update(patches)
+        mocks = {name: mock.DEFAULT for name in ("show_selection", "notify", "show_preparing", "close_preparing")
+                 if name not in patches}
+        # The paragraph picker starts the worker in the key pane's cwd.
+        with mock.patch.object(speak.Path, "cwd", return_value=self.tmp / "proj"), \
+                mock.patch.multiple(speak, **fakes), mock.patch.multiple(speak, **mocks) as used, \
+                contextlib.redirect_stderr(io.StringIO()):
+            speak.worker_answer(str(path or self.chosen))
+        return used
+
+    def test_saves_the_picked_text_as_a_selection_of_the_cwds_project(self):
+        self.run_worker()
+        folder = self.tmp / "spoken" / "proj"
+        [txt] = folder.glob("selection-*.txt")
+        self.assertRegex(txt.name, r"^selection-\d{4}-\d\d-\d\d-\d{6}\.txt$")
+        self.assertEqual(txt.read_text(), self.CHOSEN)
+        self.assertTrue(txt.with_suffix(".opus").exists())
+
+    def test_rewrites_with_the_plan_prompt_and_the_answer_timeout(self):
+        self.run_worker()
+        self.assertEqual(self.rewrites, [(self.CHOSEN, speak.PLAN_PROMPT, 60)])
+
+    def test_the_spinner_and_notification_name_the_answer(self):
+        used = self.run_worker()
+        used["show_preparing"].assert_called_once_with("the answer", replace=True)
+        self.assertEqual([c.args[0] for c in used["notify"].call_args_list], ["Speak: preparing the answer"])
+        used["show_selection"].assert_called_once()
+
+    def test_a_missing_file_is_reported_and_prepares_nothing(self):
+        used = self.run_worker(path=self.tmp / "gone.md")
+        self.assertEqual(used["notify"].call_args.args[0], "Speak: nothing to read")
+        used["show_preparing"].assert_not_called()
+        self.assertEqual(self.rewrites, [])
+
+    def test_the_cli_runs_it(self):
+        with mock.patch.object(speak, "worker_answer") as worker_answer:
+            self.assertEqual(speak.main(["speak.py", "worker", "--answer", "/s/chosen.md"]), 0)
+        worker_answer.assert_called_once_with("/s/chosen.md")
+
+
 class PanesTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -1091,7 +1149,9 @@ class PanesTest(unittest.TestCase):
 
     def test_a_selection_opens_its_text_captions_and_player_in_a_column(self):
         base = self.saved("selection-1")
-        speak.show_selection(base)
+        with mock.patch.dict(os.environ):
+            del os.environ["SPEAK_TARGET_PANE"]  # the selection action runs in the key pane
+            speak.show_selection(base)
         folder = base.parent
         self.assertEqual(self.calls("plugin"), [
             "plugin pane open --plugin speak --entrypoint plan-view --placement split --direction right"
@@ -1105,6 +1165,11 @@ class PanesTest(unittest.TestCase):
         self.assertEqual(json.loads(speak.PANES_FILE.read_text()), {
             "plan": dict(entry, pane="p1"), "captions": dict(entry, pane="p2"), "player": dict(entry, pane="p3"),
         })
+
+    def test_picked_paragraphs_open_beside_the_agent_pane_not_the_picker(self):
+        # From the paragraph picker, HERDR_PANE_ID (w2) is the picker, which has closed.
+        speak.show_selection(self.saved("selection-1"))
+        self.assertTrue(self.calls("plugin")[0].endswith("--target-pane w1"))
 
     def test_a_selection_replaces_an_open_plan_and_its_player(self):
         speak.show_plan("/work/a.md")
