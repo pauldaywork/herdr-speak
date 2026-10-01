@@ -34,7 +34,7 @@ Last answer is for when `speak.last` reads too much, such as the agent's interim
 
 - herdr 0.9.1 or newer, with the Claude integration installed (`herdr integration install claude`).
 - A Kokoro-FastAPI server, by default at `http://127.0.0.1:8880/v1`, with the `/dev/captioned_speech` endpoint for the word timings behind captions (without it, captions fall back to one line per chunk).
-- `python3`, `ffplay` and `ffmpeg` (with libopus) from FFmpeg, `fzf` for the plan picker, `nvim` to show the plan or selected text, `mpv` for the replay player, `sptlrx` and `mpv-mpris` for live captions (`sudo apt install sptlrx mpv-mpris`), and the `claude` CLI signed in.
+- `python3`, `ffplay` and `ffmpeg` (with libopus) from FFmpeg, `fzf` 0.60 or newer for the plan picker, the chooser and the paragraph picker, `nvim` to show the plan or selected text, `mpv` for the replay player, `sptlrx` and `mpv-mpris` for live captions (`sudo apt install sptlrx mpv-mpris`), and the `claude` CLI signed in.
 
 ## Start Kokoro on an NVIDIA GPU
 

@@ -1480,6 +1480,7 @@ class RunParagraphsTest(unittest.TestCase):
         self.assertIn("load:select-all", binds)
         self.assertIn("space:toggle", binds)
         self.assertEqual(command[command.index("--accept-nth") + 1], "1")
+        self.assertEqual(command[command.index("--with-shell") + 1], "sh -c")
 
     def test_the_cli_runs_it(self):
         with mock.patch.object(speak, "run_paragraphs") as run:

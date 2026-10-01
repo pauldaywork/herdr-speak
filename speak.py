@@ -1288,11 +1288,13 @@ def paragraph_command():
     Items are "<index>\\t<paragraph>"; fzf shows the paragraph and prints the
     indices. load:select-all, since start fires before --read0 input arrives.
     Enter does nothing while nothing is ticked, rather than taking the cursor's item.
+    The Enter binding's transform runs under sh, regardless of the user's shell.
     """
     return [
         "fzf", "--multi", "--read0", "--print0", "--no-input", "--layout", "reverse",
         "--delimiter", "\t", "--with-nth", "2..", "--accept-nth", "1",
         "--wrap", "--gap", "--highlight-line",
+        "--with-shell", "sh -c",
         "--bind", "load:select-all",
         "--bind", "space:toggle",
         "--bind", 'enter:transform:[ "$FZF_SELECT_COUNT" -eq 0 ] || echo accept',
