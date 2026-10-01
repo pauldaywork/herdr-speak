@@ -48,6 +48,15 @@ title = "Speak: pick a plan"
 placement = "overlay"
 command = ["sh", "-c", "exec python3 \"$HERDR_PLUGIN_ROOT/speak.py\" pick"]
 
+# Opened by the plan picker's "Last answer", focused, to the right of the pane the
+# key was pressed in: the answer's paragraphs, all ticked. Enter speaks the ticked
+# ones as a selection; Esc closes it.
+[[panes]]
+id = "paragraphs"
+title = "Speak: pick paragraphs · space tick · enter speak · esc cancel"
+placement = "split"
+command = ["sh", "-c", "exec python3 \"$HERDR_PLUGIN_ROOT/speak.py\" paragraphs"]
+
 # Opened to the right of the pane the key was pressed in, showing the picked plan,
 # or the text a selection started from, read-only while it is spoken. Both are
 # markdown, even a selection saved as .txt. Quit nvim to close it.

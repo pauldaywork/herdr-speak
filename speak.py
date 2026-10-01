@@ -35,6 +35,8 @@ CONFIG_DIR = Path(os.environ.get("HERDR_PLUGIN_CONFIG_DIR") or ROOT)
 PID_FILE = STATE_DIR / "worker.pid"
 LOG_FILE = STATE_DIR / "speak.log"
 PANES_FILE = STATE_DIR / "panes.json"
+ANSWER_FILE = STATE_DIR / "answer.md"  # the last answer, for the paragraph picker
+CHOSEN_FILE = STATE_DIR / "chosen.md"  # the paragraphs picked from it, for the worker
 PROMPT = ROOT / "prompt.md"
 PLAN_PROMPT = ROOT / "prompt-plan.md"
 
@@ -975,8 +977,8 @@ def close_pane(panes, role):
         herdr("pane", "close", entry["pane"])
 
 
-def open_pane(entrypoint, direction, target, cwd, env):
-    """Open one of this plugin's panes as a split without taking focus, and return its id."""
+def open_pane(entrypoint, direction, target, cwd, env, focus=False):
+    """Open one of this plugin's panes as a split, without taking focus unless focus, and return its id."""
     args = [
         "plugin", "pane", "open", "--plugin", os.environ.get("HERDR_PLUGIN_ID") or "speak",
         "--entrypoint", entrypoint, "--placement", "split", "--direction", direction,
@@ -984,7 +986,7 @@ def open_pane(entrypoint, direction, target, cwd, env):
     ]
     for key, value in env.items():
         args += ["--env", f"{key}={value}"]
-    args.append("--no-focus")
+    args.append("--focus" if focus else "--no-focus")
     if target:
         args += ["--target-pane", target]
     result = herdr(*args)
@@ -1213,6 +1215,65 @@ def open_picker():
         notify("Speak: couldn't open the plan picker", result.stderr.strip()[-300:])
 
 
+# --- Picking paragraphs of the last answer --------------------------------------
+
+
+def open_paragraphs(cwd):
+    """Open the paragraph picker, focused, to the right of the key pane where the audio panes go.
+
+    It replaces any open text, captions and player panes. It isn't recorded in
+    panes.json, because it closes itself when fzf exits.
+    """
+    panes = load_panes()
+    for role in ("preparing", "plan", "captions", "player"):
+        close_pane(panes, role)
+    save_panes(panes)
+    target = key_pane()
+    env = {"SPEAK_TARGET_PANE": target} if target else {}
+    open_pane("paragraphs", "right", target, cwd, env, focus=True)
+
+
+def paragraph_command():
+    """fzf ticking every paragraph: arrows move, Space ticks and unticks, Enter speaks the ticked, Esc cancels.
+
+    Items are "<index>\\t<paragraph>"; fzf shows the paragraph and prints the
+    indices. load:select-all, since start fires before --read0 input arrives.
+    Enter does nothing while nothing is ticked, rather than taking the cursor's item.
+    """
+    return [
+        "fzf", "--multi", "--read0", "--print0", "--no-input", "--layout", "reverse",
+        "--delimiter", "\t", "--with-nth", "2..", "--accept-nth", "1",
+        "--wrap", "--gap", "--highlight-line",
+        "--bind", "load:select-all",
+        "--bind", "space:toggle",
+        "--bind", 'enter:transform:[ "$FZF_SELECT_COUNT" -eq 0 ] || echo accept',
+        "--header", "Space ticks or unticks · Enter speaks the ticked · Esc cancels",
+    ]
+
+
+def run_paragraphs():
+    """Run in the paragraph picker pane: tick the last answer's paragraphs, then hand them to a worker."""
+    try:
+        paras = paragraphs(ANSWER_FILE.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError) as error:
+        notify("Speak: nothing to read", str(error))
+        return
+    try:
+        result = subprocess.run(
+            paragraph_command(), input=paragraph_input(paras), stdout=subprocess.PIPE, text=True, check=False,
+        )
+    except OSError:
+        notify("Speak: fzf not found", "Install fzf to pick paragraphs.")
+        return
+    text = chosen_text(paras, result.stdout)
+    if result.returncode != 0 or not text.strip():
+        return
+    CHOSEN_FILE.write_text(text, encoding="utf-8")
+    stop()
+    # The worker opens the spinner where this pane was, once this pane has closed.
+    start_worker(["--answer", str(CHOSEN_FILE)])
+
+
 # --- Process control -----------------------------------------------------------
 
 
@@ -1286,6 +1347,8 @@ def main(argv):
         speak_selection()
     elif command == "pick":
         pick()
+    elif command == "paragraphs":
+        run_paragraphs()
     elif command == "player":
         run_player()
     elif command == "preparing":
@@ -1293,7 +1356,7 @@ def main(argv):
     elif command == "captions":
         run_captions()
     else:
-        print(f"usage: {argv[0]} toggle [--verbatim] | stop | plan | selection | pick | player | captions | preparing",
+        print(f"usage: {argv[0]} toggle [--verbatim] | stop | plan | selection | pick | paragraphs | player | captions | preparing",
               file=sys.stderr)
         return 2
     return 0

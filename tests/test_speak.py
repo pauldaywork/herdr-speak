@@ -1101,6 +1101,16 @@ class PanesTest(unittest.TestCase):
         self.assertIn("--direction right", self.calls("plugin")[-1])
         self.assertTrue(self.calls("plugin")[-1].endswith("--target-pane w1"))
 
+    def test_the_paragraph_picker_opens_focused_beside_the_key_pane_replacing_the_audio_panes(self):
+        speak.show_plan("/work/a.md")
+        speak.open_player("/work/a.md", Path("/s/a.opus"), paused=False)
+        speak.open_paragraphs(Path("/work/proj"))
+        self.assertEqual(sorted(self.calls("pane close")), ["pane close p1", "pane close p2"])
+        self.assertEqual(self.calls("plugin")[-1],
+            "plugin pane open --plugin speak --entrypoint paragraphs --placement split --direction right"
+            " --cwd /work/proj --env SPEAK_TARGET_PANE=w1 --focus --target-pane w1")
+        self.assertEqual(json.loads(speak.PANES_FILE.read_text()), {})
+
     def test_preparing_opens_a_spinner_pane_where_the_panes_will_go(self):
         speak.show_preparing("the selection")
         self.assertEqual(self.calls("plugin"), [
@@ -1334,6 +1344,76 @@ class PickTest(unittest.TestCase):
         self.player.assert_not_called()
 
 
+class RunParagraphsTest(unittest.TestCase):
+    ANSWER = "Interim note.\n\nThe real answer.\n\n```sh\nmake\n\nmake test\n```"
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.answer = self.tmp / "answer.md"
+        self.answer.write_text(self.ANSWER)
+        self.chosen = self.tmp / "chosen.md"
+        for patch in (mock.patch.object(speak, "ANSWER_FILE", self.answer),
+                      mock.patch.object(speak, "CHOSEN_FILE", self.chosen)):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def run_picker(self, fzf=None, error=None):
+        self.fzf_calls = []
+
+        def run(command, *args, **kwargs):
+            self.fzf_calls.append((command, kwargs))
+            if error:
+                raise error
+            return fzf
+
+        with mock.patch.object(speak.subprocess, "run", side_effect=run), \
+                mock.patch.multiple(speak, stop=mock.DEFAULT, start_worker=mock.DEFAULT, notify=mock.DEFAULT) as used:
+            speak.run_paragraphs()
+        return used
+
+    def test_every_paragraph_is_offered_numbered(self):
+        self.run_picker(subprocess.CompletedProcess([], 130, stdout=""))
+        [(command, kwargs)] = self.fzf_calls
+        self.assertEqual(command, speak.paragraph_command())
+        self.assertEqual(kwargs["input"], speak.paragraph_input(speak.paragraphs(self.ANSWER)))
+
+    def test_enter_speaks_the_ticked_paragraphs_in_order(self):
+        used = self.run_picker(subprocess.CompletedProcess([], 0, stdout="2\x001\x00"))
+        self.assertEqual(self.chosen.read_text(), "The real answer.\n\n```sh\nmake\n\nmake test\n```")
+        used["stop"].assert_called_once_with()
+        used["start_worker"].assert_called_once_with(["--answer", str(self.chosen)])
+
+    def test_escape_speaks_nothing(self):
+        used = self.run_picker(subprocess.CompletedProcess([], 130, stdout=""))
+        used["start_worker"].assert_not_called()
+        self.assertFalse(self.chosen.exists())
+
+    def test_a_missing_fzf_is_reported(self):
+        used = self.run_picker(error=FileNotFoundError("fzf"))
+        used["notify"].assert_called_once_with("Speak: fzf not found", "Install fzf to pick paragraphs.")
+        used["start_worker"].assert_not_called()
+
+    def test_a_missing_answer_is_reported(self):
+        self.answer.unlink()
+        used = self.run_picker(subprocess.CompletedProcess([], 0, stdout="0\x00"))
+        self.assertEqual(used["notify"].call_args.args[0], "Speak: nothing to read")
+        self.assertEqual(self.fzf_calls, [])
+
+    def test_all_are_ticked_and_space_toggles_without_a_search_box(self):
+        command = speak.paragraph_command()
+        for flag in ("--multi", "--read0", "--print0", "--no-input"):
+            self.assertIn(flag, command)
+        binds = [command[i + 1] for i, arg in enumerate(command) if arg == "--bind"]
+        self.assertIn("load:select-all", binds)
+        self.assertIn("space:toggle", binds)
+        self.assertEqual(command[command.index("--accept-nth") + 1], "1")
+
+    def test_the_cli_runs_it(self):
+        with mock.patch.object(speak, "run_paragraphs") as run:
+            self.assertEqual(speak.main(["speak.py", "paragraphs"]), 0)
+        run.assert_called_once_with()
+
+
 class ManifestTest(unittest.TestCase):
     def setUp(self):
         import tomllib
@@ -1360,6 +1440,11 @@ class ManifestTest(unittest.TestCase):
 
     def test_requires_the_herdr_the_selection_context_was_checked_on(self):
         self.assertEqual(self.manifest["min_herdr_version"], "0.9.1")
+
+    def test_the_paragraphs_pane_is_a_split_running_speak_paragraphs(self):
+        [pane] = [p for p in self.manifest["panes"] if p["id"] == "paragraphs"]
+        self.assertEqual(pane["placement"], "split")
+        self.assertTrue(pane["command"][-1].endswith('speak.py" paragraphs'))
 
 
 if __name__ == "__main__":
