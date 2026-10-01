@@ -3,9 +3,11 @@
 
 `speak.py toggle [--verbatim]` starts speaking, or stops speech already in
 progress. `speak.py stop` only stops. `speak.py plan` stops speech in progress,
-or opens a picker pane (`speak.py pick`) whose choice is spoken and saved for
-replay. `speak.py selection` cancels a selection being prepared, or rewrites
-the selected text and shows it beside the pane with live captions
+or opens a picker pane (`speak.py pick`) that asks for files or the last
+answer. A picked plan is spoken and saved for replay. The last answer opens a
+paragraph picker (`speak.py paragraphs`) whose ticked paragraphs are spoken
+like a selection. `speak.py selection` cancels a selection being prepared, or
+rewrites the selected text and shows it beside the pane with live captions
 (`speak.py captions`) and a player (`speak.py player`). The work runs in a
 detached worker so the herdr action returns at once.
 """
@@ -909,8 +911,55 @@ def picker_lines(paths, cwd, home=None):
     return lines
 
 
+MODES = ["Files", "Last answer"]
+
+
+def choose_mode():
+    """Ask in fzf whether to speak a file or the last answer: one of MODES, or None on Esc.
+
+    Raises OSError when fzf is missing.
+    """
+    result = subprocess.run(
+        [
+            "fzf", "--no-input", "--layout", "reverse", "--no-sort",
+            "--header", "Enter picks, Esc cancels",
+        ],
+        input="\n".join(MODES), stdout=subprocess.PIPE, text=True, check=False,
+    )
+    choice = result.stdout.strip()
+    return choice if result.returncode == 0 and choice in MODES else None
+
+
 def pick():
-    """Run in the picker pane: choose a plan with fzf, then speak it."""
+    """Run in the picker pane: choose files or the last answer, then what of it to speak."""
+    try:
+        mode = choose_mode()
+    except OSError:
+        notify("Speak: fzf not found", "Install fzf to pick a plan.")
+        return
+    if mode == "Files":
+        pick_plan()
+    elif mode == "Last answer":
+        pick_answer()
+
+
+def pick_answer():
+    """Save the key pane's last answer and open the paragraph picker on it.
+
+    This runs in the overlay, whose own pane isn't the agent's, so the answer
+    comes from SPEAK_TARGET_PANE.
+    """
+    try:
+        text = last_answer(os.environ.get("SPEAK_TARGET_PANE"))
+    except Exception as error:  # noqa: BLE001 - every failure becomes a notification
+        notify("Speak: nothing to read", str(error))
+        return
+    ANSWER_FILE.write_text(text, encoding="utf-8")
+    open_paragraphs(Path.cwd())
+
+
+def pick_plan():
+    """Choose a plan with fzf, then speak it."""
     config = load_config()
     cwd = Path.cwd()
     paths = plan_files([cwd, Path.home() / ".claude" / "plans"], exclude=spoken_dir(config))

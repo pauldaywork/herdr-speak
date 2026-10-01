@@ -25,10 +25,11 @@ title = "Speak: stop playback"
 contexts = ["pane"]
 command = ["python3", "speak.py", "stop"]
 
-# Press to pick a markdown plan and hear it; press again while it plays to stop.
+# Press to pick a markdown plan, or paragraphs of the last answer, and hear it;
+# press again while it is preparing to cancel.
 [[actions]]
 id = "plan"
-title = "Speak: pick a plan file and read it aloud (again to stop)"
+title = "Speak: pick a plan file or last-answer paragraphs and read them aloud (again to cancel)"
 contexts = ["pane"]
 command = ["python3", "speak.py", "plan"]
 
@@ -41,10 +42,11 @@ contexts = ["pane", "selection"]
 command = ["python3", "speak.py", "selection"]
 
 # Opened by the plan action in the focused pane's cwd, so it reaches speak.py
-# through HERDR_PLUGIN_ROOT rather than a relative path.
+# through HERDR_PLUGIN_ROOT rather than a relative path. It asks for files or
+# the last answer first.
 [[panes]]
 id = "plan-picker"
-title = "Speak: pick a plan"
+title = "Speak: files or last answer"
 placement = "overlay"
 command = ["sh", "-c", "exec python3 \"$HERDR_PLUGIN_ROOT/speak.py\" pick"]
 

@@ -1305,7 +1305,7 @@ class PickTest(unittest.TestCase):
                 mock.patch.object(speak, "start_worker") as self.start, \
                 mock.patch.object(speak, "show_plan") as self.show, \
                 mock.patch.object(speak, "open_player") as self.player:
-            speak.pick()
+            speak.pick_plan()
 
     def chosen(self):
         return subprocess.CompletedProcess([], 0, stdout=f"{self.plan}\t2026-09-30 10:00  plan.md\n")
@@ -1333,7 +1333,7 @@ class PickTest(unittest.TestCase):
                 mock.patch.object(speak.subprocess, "run", side_effect=FileNotFoundError("fzf")), \
                 mock.patch.object(speak, "notify") as notify, \
                 mock.patch.object(speak, "start_worker") as start:
-            speak.pick()
+            speak.pick_plan()
         notify.assert_called_once_with("Speak: fzf not found", "Install fzf to pick a plan.")
         start.assert_not_called()
 
@@ -1342,6 +1342,79 @@ class PickTest(unittest.TestCase):
         self.start.assert_not_called()
         self.show.assert_not_called()
         self.player.assert_not_called()
+
+
+class PickModeTest(unittest.TestCase):
+    def pick(self, stdout="", returncode=0, error=None):
+        self.calls = []
+
+        def run(command, *args, **kwargs):
+            self.calls.append((command, kwargs))
+            if error:
+                raise error
+            return subprocess.CompletedProcess(command, returncode, stdout=stdout)
+
+        with mock.patch.object(speak.subprocess, "run", side_effect=run), \
+                mock.patch.multiple(speak, pick_plan=mock.DEFAULT, pick_answer=mock.DEFAULT,
+                                    notify=mock.DEFAULT) as used:
+            speak.pick()
+        return used
+
+    def test_offers_files_then_the_last_answer_without_a_search_box(self):
+        self.pick(returncode=130)
+        [(command, kwargs)] = self.calls
+        self.assertEqual(command[0], "fzf")
+        self.assertIn("--no-input", command)
+        self.assertEqual(kwargs["input"], "Files\nLast answer")
+
+    def test_files_runs_the_plan_picker(self):
+        used = self.pick("Files\n")
+        used["pick_plan"].assert_called_once_with()
+        used["pick_answer"].assert_not_called()
+
+    def test_last_answer_runs_the_paragraph_picker(self):
+        used = self.pick("Last answer\n")
+        used["pick_answer"].assert_called_once_with()
+        used["pick_plan"].assert_not_called()
+
+    def test_escape_runs_neither(self):
+        used = self.pick(returncode=130)
+        used["pick_plan"].assert_not_called()
+        used["pick_answer"].assert_not_called()
+
+    def test_a_missing_fzf_is_reported(self):
+        used = self.pick(error=FileNotFoundError("fzf"))
+        used["notify"].assert_called_once_with("Speak: fzf not found", "Install fzf to pick a plan.")
+        used["pick_plan"].assert_not_called()
+
+
+class PickAnswerTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.answer = self.tmp / "answer.md"
+        patch = mock.patch.object(speak, "ANSWER_FILE", self.answer)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def pick(self, last_answer):
+        with mock.patch.dict(os.environ, {"SPEAK_TARGET_PANE": "agent-1"}), \
+                mock.patch.object(speak.Path, "cwd", return_value=Path("/work/proj")), \
+                mock.patch.multiple(speak, last_answer=last_answer, open_paragraphs=mock.DEFAULT,
+                                    notify=mock.DEFAULT) as used:
+            speak.pick_answer()
+        return used
+
+    def test_the_key_panes_answer_is_saved_and_the_paragraph_picker_opens(self):
+        last_answer = mock.Mock(return_value="Note.\n\nAnswer.")
+        used = self.pick(last_answer)
+        last_answer.assert_called_once_with("agent-1")
+        self.assertEqual(self.answer.read_text(), "Note.\n\nAnswer.")
+        used["open_paragraphs"].assert_called_once_with(Path("/work/proj"))
+
+    def test_no_answer_is_reported_and_opens_nothing(self):
+        used = self.pick(mock.Mock(side_effect=RuntimeError("The agent hasn't written an answer yet.")))
+        used["notify"].assert_called_once_with("Speak: nothing to read", "The agent hasn't written an answer yet.")
+        used["open_paragraphs"].assert_not_called()
 
 
 class RunParagraphsTest(unittest.TestCase):
