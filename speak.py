@@ -119,20 +119,27 @@ def text_blocks(content):
 
 
 def last_turn_text(messages, finished_only=False):
-    """messages yields (role, content) in order; return the last turn's assistant text.
+    """messages yields (role, content, ended) in order; return the last turn's assistant text.
 
-    With finished_only, skip the turn in progress (the one after the last prompt).
+    ended is true for the assistant message that ends a turn. With finished_only,
+    skip the turn in progress (the one after the last prompt) unless it has ended.
     """
-    current, finished = [], []
-    for role, content in messages:
+    current, finished, ended = [], [], False
+    for role, content, last in messages:
         if role == "user":
             if current:
                 finished = current
-            current = []
+            current, ended = [], False
         elif role == "assistant":
             current += [t for t in text_blocks(content) if t.strip()]
-    turn = finished if finished_only or not current else current
+            ended = last
+    turn = finished if (finished_only and not ended) or not current else current
     return "\n\n".join(turn).strip()
+
+
+# Stop reasons that end a turn rather than hand over to a tool.
+CLAUDE_TURN_ENDS = {"end_turn", "max_tokens", "stop_sequence", "refusal"}
+PI_TURN_ENDS = {"stop", "length", "error", "aborted"}
 
 
 def claude_messages(path):
@@ -142,14 +149,14 @@ def claude_messages(path):
         message = entry.get("message") or {}
         content = message.get("content")
         if entry.get("type") == "assistant":
-            yield "assistant", content
+            yield "assistant", content, message.get("stop_reason") in CLAUDE_TURN_ENDS
         elif entry.get("type") == "user":
             # Tool results come back as user entries; only a real prompt starts a turn.
             is_tool_result = isinstance(content, list) and any(
                 isinstance(b, dict) and b.get("type") == "tool_result" for b in content
             )
             if not is_tool_result:
-                yield "user", content
+                yield "user", content, False
 
 
 def pi_messages(path):
@@ -159,7 +166,7 @@ def pi_messages(path):
         message = entry.get("message") or {}
         role = message.get("role")
         if role in ("user", "assistant"):
-            yield role, message.get("content")
+            yield role, message.get("content"), message.get("stopReason") in PI_TURN_ENDS
 
 
 def claude_transcript(session):

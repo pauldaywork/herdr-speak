@@ -138,6 +138,68 @@ class LastAnswerPaneTest(unittest.TestCase):
             speak.last_answer()
 
 
+class LastAnswerWhileWorkingTest(unittest.TestCase):
+    """herdr can still call a pane working after its agent has ended the turn."""
+
+    def last_answer(self, agent, entries):
+        tmp = Path(tempfile.mkdtemp())
+        transcript = tmp / "session.jsonl"
+        transcript.write_text("".join(json.dumps(entry) + "\n" for entry in entries))
+        snapshot = {"result": {"snapshot": {"panes": [
+            {"pane_id": "agent", "agent": agent, "agent_status": "working",
+             "agent_session": {"kind": "path", "value": str(transcript)}},
+        ]}}}
+        (tmp / "snapshot.json").write_text(json.dumps(snapshot))
+        env = {
+            "HERDR_BIN_PATH": str(fake_command(tmp, "herdr", FAKE_HERDR_SNAPSHOT)),
+            "FAKE_SNAPSHOT": str(tmp / "snapshot.json"),
+        }
+        with mock.patch.dict(os.environ, env):
+            return speak.last_answer("agent")
+
+    def claude(self, text, stop_reason):
+        return {"type": "assistant", "message": {
+            "content": [{"type": "text", "text": text}], "stop_reason": stop_reason}}
+
+    def pi(self, role, text, stop_reason=None):
+        message = {"role": role, "content": [{"type": "text", "text": text}]}
+        if stop_reason:
+            message["stopReason"] = stop_reason
+        return {"type": "message", "message": message}
+
+    def test_claude_reads_a_turn_that_ended_with_end_turn(self):
+        self.assertEqual(self.last_answer("claude", [
+            {"type": "user", "message": {"content": "First?"}},
+            self.claude("First answer.", "end_turn"),
+            {"type": "user", "message": {"content": "Second?"}},
+            self.claude("Second answer.", "end_turn"),
+        ]), "Second answer.")
+
+    def test_claude_skips_a_turn_still_using_tools(self):
+        self.assertEqual(self.last_answer("claude", [
+            {"type": "user", "message": {"content": "First?"}},
+            self.claude("First answer.", "end_turn"),
+            {"type": "user", "message": {"content": "Second?"}},
+            self.claude("Let me look.", "tool_use"),
+        ]), "First answer.")
+
+    def test_pi_reads_a_turn_that_ended_with_stop(self):
+        self.assertEqual(self.last_answer("pi", [
+            self.pi("user", "First?"),
+            self.pi("assistant", "First answer.", "stop"),
+            self.pi("user", "Second?"),
+            self.pi("assistant", "Second answer.", "stop"),
+        ]), "Second answer.")
+
+    def test_pi_reads_a_turn_that_was_aborted(self):
+        self.assertEqual(self.last_answer("pi", [
+            self.pi("user", "First?"),
+            self.pi("assistant", "First answer.", "stop"),
+            self.pi("user", "Second?"),
+            self.pi("assistant", "Half an answer.", "aborted"),
+        ]), "Half an answer.")
+
+
 class ParagraphsTest(unittest.TestCase):
     def test_blank_lines_split_paragraphs(self):
         self.assertEqual(speak.paragraphs("One.\n\nTwo\nlines.\n\n\nThree.\n"), ["One.", "Two\nlines.", "Three."])
